@@ -59,3 +59,12 @@ gst-launch-1.0 videotestsrc ! \
 - The sink uses the fake camera register map (same addresses as `arv-fake-camera.xml`), so your GenICam XML should match those registers.
 - Stream destination is controlled by the client writing `ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET` and `ARV_GVBS_STREAM_CHANNEL_0_PORT_OFFSET`.
 - Once caps are negotiated, the sink updates width/height/pixel format to match the negotiated caps.
+
+## Multiple instances
+
+GVCP listens on UDP port 3956, so only one `aravissink` can bind to a given IP address. You can run multiple instances on the same machine if each one binds to a different IP address. Common approaches:
+
+- Use IP aliases on one NIC (e.g., `eth0:1`, `eth0:2`), and set `interface=` per sink.
+- Run each sink in a network namespace or container with its own IP.
+
+Each instance will respond to discovery on its bound address and should expose a unique `serial` value so clients can distinguish devices.
