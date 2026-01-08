@@ -28,7 +28,10 @@ enum
 	PROP_0,
 	PROP_INTERFACE_NAME,
 	PROP_SERIAL_NUMBER,
-	PROP_GENICAM_FILENAME
+	PROP_GENICAM_FILENAME,
+	PROP_DEFAULT_WIDTH,
+	PROP_DEFAULT_HEIGHT,
+	PROP_DEFAULT_PIXEL_FORMAT
 };
 
 typedef enum {
@@ -60,6 +63,9 @@ typedef struct {
 	guint32 width;
 	guint32 height;
 	ArvPixelFormat pixel_format;
+	guint32 default_width;
+	guint32 default_height;
+	ArvPixelFormat default_pixel_format;
 
 	guint8 *packet_buffer;
 	gsize packet_buffer_size;
@@ -305,6 +311,42 @@ _gvcp_thread (void *user_data)
 	return NULL;
 }
 
+static ArvPixelFormat
+_pixel_format_from_string (const char *format_string)
+{
+	if (g_strcmp0 (format_string, "Mono8") == 0)
+		return ARV_PIXEL_FORMAT_MONO_8;
+	if (g_strcmp0 (format_string, "Mono16") == 0)
+		return ARV_PIXEL_FORMAT_MONO_16;
+	if (g_strcmp0 (format_string, "RGB8") == 0)
+		return ARV_PIXEL_FORMAT_RGB_8_PACKED;
+
+	return 0;
+}
+
+static void
+_apply_default_registers (GstAravisSinkPrivate *priv)
+{
+	if (!ARV_IS_FAKE_CAMERA (priv->camera))
+		return;
+
+	g_mutex_lock (&priv->camera_mutex);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_SENSOR_WIDTH, priv->default_width);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_SENSOR_HEIGHT, priv->default_height);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_WIDTH, priv->default_width);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_HEIGHT, priv->default_height);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_X_OFFSET, 0);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_Y_OFFSET, 0);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_BINNING_HORIZONTAL, 1);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_BINNING_VERTICAL, 1);
+	arv_fake_camera_write_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_PIXEL_FORMAT, priv->default_pixel_format);
+	g_mutex_unlock (&priv->camera_mutex);
+
+	priv->width = priv->default_width;
+	priv->height = priv->default_height;
+	priv->pixel_format = priv->default_pixel_format;
+}
+
 static gboolean
 gst_aravis_sink_start (GstBaseSink *sink)
 {
@@ -399,6 +441,8 @@ gst_aravis_sink_start (GstBaseSink *sink)
 
 	priv->packet_buffer_size = ARV_GVSP_MAXIMUM_PACKET_SIZE;
 	priv->packet_buffer = g_malloc (priv->packet_buffer_size);
+
+	_apply_default_registers (priv);
 
 	return TRUE;
 }
@@ -609,6 +653,7 @@ static void
 gst_aravis_sink_set_property (GObject *object, guint prop_id, const GValue *value, GParamSpec *pspec)
 {
 	GstAravisSinkPrivate *priv = gst_aravis_sink_get_instance_private (GST_ARAVIS_SINK (object));
+	ArvPixelFormat pixel_format;
 
 	switch (prop_id) {
 		case PROP_INTERFACE_NAME:
@@ -622,6 +667,23 @@ gst_aravis_sink_set_property (GObject *object, guint prop_id, const GValue *valu
 		case PROP_GENICAM_FILENAME:
 			g_free (priv->genicam_filename);
 			priv->genicam_filename = g_value_dup_string (value);
+			break;
+		case PROP_DEFAULT_WIDTH:
+			priv->default_width = g_value_get_uint (value);
+			_apply_default_registers (priv);
+			break;
+		case PROP_DEFAULT_HEIGHT:
+			priv->default_height = g_value_get_uint (value);
+			_apply_default_registers (priv);
+			break;
+		case PROP_DEFAULT_PIXEL_FORMAT:
+			pixel_format = _pixel_format_from_string (g_value_get_string (value));
+			if (pixel_format != 0) {
+				priv->default_pixel_format = pixel_format;
+				_apply_default_registers (priv);
+			} else {
+				GST_WARNING_OBJECT (object, "Unsupported default-pixel-format");
+			}
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -643,6 +705,28 @@ gst_aravis_sink_get_property (GObject *object, guint prop_id, GValue *value, GPa
 			break;
 		case PROP_GENICAM_FILENAME:
 			g_value_set_string (value, priv->genicam_filename);
+			break;
+		case PROP_DEFAULT_WIDTH:
+			g_value_set_uint (value, priv->default_width);
+			break;
+		case PROP_DEFAULT_HEIGHT:
+			g_value_set_uint (value, priv->default_height);
+			break;
+		case PROP_DEFAULT_PIXEL_FORMAT:
+			switch (priv->default_pixel_format) {
+				case ARV_PIXEL_FORMAT_MONO_8:
+					g_value_set_string (value, "Mono8");
+					break;
+				case ARV_PIXEL_FORMAT_MONO_16:
+					g_value_set_string (value, "Mono16");
+					break;
+				case ARV_PIXEL_FORMAT_RGB_8_PACKED:
+					g_value_set_string (value, "RGB8");
+					break;
+				default:
+					g_value_set_string (value, "Mono8");
+					break;
+			}
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -683,6 +767,27 @@ gst_aravis_sink_class_init (GstAravisSinkClass *klass)
 							      "GenICam XML file to expose",
 							      NULL,
 							      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property (gobject_class,
+					 PROP_DEFAULT_WIDTH,
+					 g_param_spec_uint ("default-width",
+							    "Default Width",
+							    "Default width before caps negotiation",
+							    1, G_MAXUINT, 640,
+							    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property (gobject_class,
+					 PROP_DEFAULT_HEIGHT,
+					 g_param_spec_uint ("default-height",
+							    "Default Height",
+							    "Default height before caps negotiation",
+							    1, G_MAXUINT, 512,
+							    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+	g_object_class_install_property (gobject_class,
+					 PROP_DEFAULT_PIXEL_FORMAT,
+					 g_param_spec_string ("default-pixel-format",
+							      "Default Pixel Format",
+							      "Default pixel format (Mono8, Mono16, RGB8)",
+							      "Mono16",
+							      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
 	gst_element_class_set_details_simple (element_class,
 					      "Aravis Video Sink",
@@ -715,5 +820,8 @@ gst_aravis_sink_init (GstAravisSink *sink)
 	priv->genicam_filename = NULL;
 	priv->frame_id = 0;
 	priv->pixel_format = ARV_PIXEL_FORMAT_MONO_8;
+	priv->default_width = 640;
+	priv->default_height = 512;
+	priv->default_pixel_format = ARV_PIXEL_FORMAT_MONO_16;
 	g_mutex_init (&priv->camera_mutex);
 }

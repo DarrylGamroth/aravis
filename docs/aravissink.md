@@ -23,6 +23,9 @@ Other formats should be converted upstream with `videoconvert`.
 - `interface` (string): Interface name or IPv4 address to bind (default `127.0.0.1`).
 - `serial` (string): Device serial number exposed via GVCP discovery.
 - `genicam` (string): Path to GenICam XML file to expose.
+- `default-width` (uint): Default width before caps negotiation (default `640`).
+- `default-height` (uint): Default height before caps negotiation (default `512`).
+- `default-pixel-format` (string): Default pixel format before caps negotiation (`Mono8`, `Mono16`, `RGB8`; default `Mono16`).
 
 ## Default GenICam XML
 
@@ -55,3 +58,4 @@ gst-launch-1.0 videotestsrc ! \
 
 - The sink uses the fake camera register map (same addresses as `arv-fake-camera.xml`), so your GenICam XML should match those registers.
 - Stream destination is controlled by the client writing `ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET` and `ARV_GVBS_STREAM_CHANNEL_0_PORT_OFFSET`.
+- Once caps are negotiated, the sink updates width/height/pixel format to match the negotiated caps.
