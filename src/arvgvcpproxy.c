@@ -122,6 +122,34 @@ _backend_write_register (ArvGvcpProxyBackend *backend, guint32 address, guint32 
 }
 
 static void
+_maybe_notify_stream_config (ArvGvcpProxyBackend *backend, guint32 address)
+{
+	guint32 stream_ip = 0;
+	guint32 stream_port = 0;
+	guint32 packet_size = 0;
+
+	if (backend->vtable->stream_config_changed == NULL)
+		return;
+
+	if (address != ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET &&
+	    address != ARV_GVBS_STREAM_CHANNEL_0_PORT_OFFSET &&
+	    address != ARV_GVBS_STREAM_CHANNEL_0_PACKET_SIZE_OFFSET)
+		return;
+
+	if (backend->vtable->read_register == NULL)
+		return;
+
+	if (!backend->vtable->read_register (backend, ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET, &stream_ip))
+		return;
+	if (!backend->vtable->read_register (backend, ARV_GVBS_STREAM_CHANNEL_0_PORT_OFFSET, &stream_port))
+		return;
+	if (!backend->vtable->read_register (backend, ARV_GVBS_STREAM_CHANNEL_0_PACKET_SIZE_OFFSET, &packet_size))
+		return;
+
+	backend->vtable->stream_config_changed (backend, stream_ip, (guint16) stream_port, packet_size);
+}
+
+static void
 _proxy_release_controller (ArvGvcpProxy *proxy)
 {
 	if (proxy->controller_address == NULL)
@@ -238,6 +266,7 @@ _handle_control_packet (ArvGvcpProxy *proxy, GSocket *socket,
 
 			if (proxy->backend->vtable->write_register != NULL)
 				proxy->backend->vtable->write_register (proxy->backend, register_address, register_value);
+			_maybe_notify_stream_config (proxy->backend, register_address);
 			arv_info_device ("[GvcpProxy::handle_control_packet] Write register command %d -> %d",
 					  register_address, register_value);
 			ack_packet = arv_gvcp_packet_new_write_register_ack (1, packet_id,

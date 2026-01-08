@@ -20,6 +20,8 @@ typedef struct {
 	gboolean (*write_memory) (ArvGvcpProxyBackend *backend, guint32 address, guint32 size, const void *buffer);
 	gboolean (*read_register) (ArvGvcpProxyBackend *backend, guint32 address, guint32 *value);
 	gboolean (*write_register) (ArvGvcpProxyBackend *backend, guint32 address, guint32 value);
+	void (*stream_config_changed) (ArvGvcpProxyBackend *backend, guint32 stream_ip,
+				       guint16 stream_port, guint32 packet_size);
 	void (*set_inet_address) (ArvGvcpProxyBackend *backend, GInetAddress *address);
 	void (*destroy) (ArvGvcpProxyBackend *backend);
 } ArvGvcpProxyBackendVTable;
