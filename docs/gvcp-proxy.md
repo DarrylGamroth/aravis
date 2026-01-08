@@ -74,3 +74,13 @@ Clients (Aravis) will typically:
 - Write `AcquisitionStart` to begin streaming.
 
 Your backend should ensure those GVBS registers are implemented. If you want to forward stream destination settings to PL logic, implement `stream_config_changed` and apply the values whenever the GVBS stream registers are updated.
+
+## Multicast notes
+
+If a client writes a multicast destination (224.0.0.0/4) into the stream channel IP register, GVSP should be sent to the corresponding multicast MAC address. The proxy does not enforce unicast vs multicast, so your backend can:
+
+- accept multicast IPs in `ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET`,
+- compute the multicast MAC (`01:00:5e:xx:xx:xx` from the lower 23 bits of the IP),
+- program the PL sender accordingly.
+
+GVCP remains unicast; only GVSP becomes multicast. The receiver must join the multicast group (IGMP) and the network must allow multicast.
