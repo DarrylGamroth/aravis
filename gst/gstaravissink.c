@@ -7,11 +7,11 @@
 
 #include "gstaravissink.h"
 
-#include <arvfakecamera.h>
+#include <gst/gst.h>
+#include <arv.h>
 #include <arvgvcpprivate.h>
 #include <arvgvspprivate.h>
 #include <arvnetworkprivate.h>
-#include <gst/gst.h>
 #include <gio/gio.h>
 #include <string.h>
 
@@ -275,6 +275,7 @@ _gvcp_thread (void *user_data)
 {
 	GstAravisSinkPrivate *priv = user_data;
 	GInputVector input_vector;
+	unsigned int i;
 
 	input_vector.buffer = g_malloc0 (GST_ARAVIS_SINK_BUFFER_SIZE);
 	input_vector.size = GST_ARAVIS_SINK_BUFFER_SIZE;
@@ -286,8 +287,9 @@ _gvcp_thread (void *user_data)
 		if (n_events <= 0)
 			continue;
 
-		for (unsigned int i = 0; i < ARV_SINK_N_INPUT_SOCKETS; i++) {
+		for (i = 0; i < ARV_SINK_N_INPUT_SOCKETS; i++) {
 			GSocket *socket = priv->input_sockets[i];
+			GSocketAddress *remote_address = NULL;
 			int count;
 
 			if (!G_IS_SOCKET (socket))
@@ -295,7 +297,6 @@ _gvcp_thread (void *user_data)
 
 			arv_gpollfd_clear_one (&priv->socket_fds[i], socket);
 
-			GSocketAddress *remote_address = NULL;
 			count = g_socket_receive_message (socket, &remote_address,
 							  &input_vector, 1, NULL, NULL,
 							  NULL, NULL, NULL);
@@ -601,7 +602,7 @@ gst_aravis_sink_render (GstBaseSink *sink, GstBuffer *buffer)
 					  &packet_size);
 
 	g_socket_send_to (priv->gvsp_socket, stream_address,
-			  priv->packet_buffer, packet_size, NULL, &error);
+			  (const char *) priv->packet_buffer, packet_size, NULL, &error);
 	g_clear_error (&error);
 
 	block_id++;
@@ -615,7 +616,7 @@ gst_aravis_sink_render (GstBaseSink *sink, GstBuffer *buffer)
 					     &packet_size);
 
 		g_socket_send_to (priv->gvsp_socket, stream_address,
-				  priv->packet_buffer, packet_size, NULL, &error);
+				  (const char *) priv->packet_buffer, packet_size, NULL, &error);
 		g_clear_error (&error);
 
 		offset += data_size;
@@ -627,7 +628,7 @@ gst_aravis_sink_render (GstBaseSink *sink, GstBuffer *buffer)
 					  &packet_size);
 
 	g_socket_send_to (priv->gvsp_socket, stream_address,
-			  priv->packet_buffer, packet_size, NULL, &error);
+			  (const char *) priv->packet_buffer, packet_size, NULL, &error);
 	g_clear_error (&error);
 
 	gst_buffer_unmap (buffer, &map);
