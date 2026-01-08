@@ -517,6 +517,7 @@ main (int argc, char **argv)
 
 		for (i = 0; i < ARV_GVCP_PROXY_N_INPUT_SOCKETS; i++) {
 			GSocket *socket = proxy.input_sockets[i];
+			GSocketAddress *remote_address = NULL;
 			int count;
 
 			if (!G_IS_SOCKET (socket))
@@ -524,7 +525,6 @@ main (int argc, char **argv)
 
 			arv_gpollfd_clear_one (&proxy.socket_fds[i], socket);
 
-			GSocketAddress *remote_address = NULL;
 			count = g_socket_receive_message (socket, &remote_address,
 							  &input_vector, 1, NULL, NULL,
 							  NULL, NULL, NULL);
