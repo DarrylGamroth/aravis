@@ -237,3 +237,22 @@ Notes:
 - The `module.set()` / `module.execute()` APIs are documented in the eGrabber
   Python section (`/opt/euresys/egrabber/doc/egrabber.html`).
 - Capture GVCP with tcpdump during this run to see which registers the SDK touches.
+
+## Control-only GVCP workflow (no Aravis/GenTL stream)
+
+This starts acquisition over GVCP so another process can receive raw GVSP
+packets directly. Do not open a data stream in the control process.
+
+1) Read GenICam, set stream destination:
+   - Write `GevSCDA` to the receiver IP (big endian IPv4).
+   - Write `GevSCPHostPort` to the receiver UDP port.
+   - Optionally set `GevSCPSPacketSize`.
+2) Configure camera features (Width/Height/Offset/PixelFormat/etc).
+3) Execute `AcquisitionStart` and keep the GVCP control channel alive.
+4) Receiver binds to the chosen UDP port and processes GVSP packets.
+
+Notes:
+
+- Some cameras require `TLParamsLocked` or a stream parameter lock; if you see
+  `AccessDenied`, set the lock before `AcquisitionStart`.
+- Maintain heartbeat or disable it if the device supports that.
