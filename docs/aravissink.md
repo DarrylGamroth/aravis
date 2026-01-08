@@ -24,6 +24,15 @@ Other formats should be converted upstream with `videoconvert`.
 - `serial` (string): Device serial number exposed via GVCP discovery.
 - `genicam` (string): Path to GenICam XML file to expose.
 
+## Default GenICam XML
+
+Use `docs/aravissink-default.xml` as a starter GenICam XML. It maps the supported
+GStreamer caps to the corresponding PFNC pixel formats:
+
+- `GRAY8` -> `Mono8` (`0x01080001`)
+- `GRAY16_LE` -> `Mono16` (`0x01100007`)
+- `RGB` -> `RGB8` (`0x02180014`)
+
 ## Example pipelines
 
 Stream 640x512 Mono16 from a test pattern:
