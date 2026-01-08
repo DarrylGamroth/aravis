@@ -58,6 +58,13 @@ typedef struct {
 	gint64 controller_time;
 	GThread *gvcp_thread;
 	gint cancel;
+	GstElement *element;
+	GMutex config_mutex;
+	gboolean reconfigure_pending;
+	guint32 pending_width;
+	guint32 pending_height;
+	ArvPixelFormat pending_pixel_format;
+	guint32 pending_frame_period_us;
 
 	guint16 frame_id;
 	guint32 width;
@@ -73,6 +80,8 @@ typedef struct {
 
 G_DEFINE_TYPE_WITH_CODE (GstAravisSink, gst_aravis_sink, GST_TYPE_BASE_SINK,
 			 G_ADD_PRIVATE (GstAravisSink))
+
+static void _emit_reconfigure (GstElement *element, gpointer user_data);
 
 static gboolean
 _g_inet_socket_address_is_equal (GInetSocketAddress *a, GInetSocketAddress *b)
@@ -147,6 +156,7 @@ _handle_control_packet (GstAravisSinkPrivate *priv, GSocket *socket,
 	guint32 register_value;
 	gboolean write_access;
 	gboolean success = FALSE;
+	gboolean reconfigure_requested = FALSE;
 
 	g_mutex_lock (&priv->camera_mutex);
 
@@ -235,6 +245,11 @@ _handle_control_packet (GstAravisSinkPrivate *priv, GSocket *socket,
 			}
 
 			arv_fake_camera_write_register (priv->camera, register_address, register_value);
+			if (register_address == ARV_FAKE_CAMERA_REGISTER_WIDTH ||
+			    register_address == ARV_FAKE_CAMERA_REGISTER_HEIGHT ||
+			    register_address == ARV_FAKE_CAMERA_REGISTER_PIXEL_FORMAT ||
+			    register_address == ARV_FAKE_CAMERA_REGISTER_ACQUISITION_FRAME_PERIOD_US)
+				reconfigure_requested = TRUE;
 			GST_INFO ("[AravisSink::handle_control_packet] Write register command %d -> %d",
 				  register_address, register_value);
 			ack_packet = arv_gvcp_packet_new_write_register_ack (1, packet_id,
@@ -242,6 +257,31 @@ _handle_control_packet (GstAravisSinkPrivate *priv, GSocket *socket,
 			break;
 		default:
 			GST_WARNING ("[AravisSink::handle_control_packet] Unknown command");
+	}
+
+	if (reconfigure_requested && priv->element != NULL) {
+		guint32 width = 0;
+		guint32 height = 0;
+		guint32 pixel_format = 0;
+		guint32 frame_period_us = 0;
+
+		arv_fake_camera_read_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_WIDTH, &width);
+		arv_fake_camera_read_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_HEIGHT, &height);
+		arv_fake_camera_read_register (priv->camera, ARV_FAKE_CAMERA_REGISTER_PIXEL_FORMAT, &pixel_format);
+		arv_fake_camera_read_register (priv->camera,
+					       ARV_FAKE_CAMERA_REGISTER_ACQUISITION_FRAME_PERIOD_US,
+					       &frame_period_us);
+
+		g_mutex_lock (&priv->config_mutex);
+		priv->pending_width = width;
+		priv->pending_height = height;
+		priv->pending_pixel_format = (ArvPixelFormat) pixel_format;
+		priv->pending_frame_period_us = frame_period_us;
+		if (!priv->reconfigure_pending) {
+			priv->reconfigure_pending = TRUE;
+			gst_element_call_async (priv->element, _emit_reconfigure, priv, NULL);
+		}
+		g_mutex_unlock (&priv->config_mutex);
 	}
 
 	if (priv->controller_address == NULL &&
@@ -323,6 +363,68 @@ _pixel_format_from_string (const char *format_string)
 		return ARV_PIXEL_FORMAT_RGB_8_PACKED;
 
 	return 0;
+}
+
+static const char *
+_pixel_format_to_gst_format (ArvPixelFormat pixel_format)
+{
+	switch (pixel_format) {
+		case ARV_PIXEL_FORMAT_MONO_8:
+			return "GRAY8";
+		case ARV_PIXEL_FORMAT_MONO_16:
+			return "GRAY16_LE";
+		case ARV_PIXEL_FORMAT_RGB_8_PACKED:
+			return "RGB";
+		default:
+			return NULL;
+	}
+}
+
+static void
+_emit_reconfigure (GstElement *element, gpointer user_data)
+{
+	GstAravisSinkPrivate *priv = user_data;
+	GstStructure *structure;
+	GstMessage *message;
+	GstPad *pad;
+	guint32 width;
+	guint32 height;
+	ArvPixelFormat pixel_format;
+	guint32 frame_period_us;
+	gint framerate_num = 0;
+	gint framerate_den = 1;
+	const char *format_string;
+	double fps = 0.0;
+
+	g_mutex_lock (&priv->config_mutex);
+	width = priv->pending_width;
+	height = priv->pending_height;
+	pixel_format = priv->pending_pixel_format;
+	frame_period_us = priv->pending_frame_period_us;
+	priv->reconfigure_pending = FALSE;
+	g_mutex_unlock (&priv->config_mutex);
+
+	format_string = _pixel_format_to_gst_format (pixel_format);
+	if (frame_period_us > 0) {
+		fps = 1000000.0 / (double) frame_period_us;
+		gst_util_double_to_fraction (fps, &framerate_num, &framerate_den);
+	}
+
+	structure = gst_structure_new ("aravissink-reconfigure",
+				       "width", G_TYPE_UINT, width,
+				       "height", G_TYPE_UINT, height,
+				       "format", G_TYPE_STRING, format_string != NULL ? format_string : "UNKNOWN",
+				       "framerate", GST_TYPE_FRACTION, framerate_num, framerate_den,
+				       NULL);
+
+	message = gst_message_new_application (GST_OBJECT (element), structure);
+	gst_element_post_message (element, message);
+
+	pad = gst_element_get_static_pad (element, "sink");
+	if (pad != NULL) {
+		gst_pad_push_event (pad, gst_event_new_reconfigure ());
+		gst_object_unref (pad);
+	}
 }
 
 static void
@@ -643,6 +745,7 @@ gst_aravis_sink_finalize (GObject *object)
 	GstAravisSinkPrivate *priv = gst_aravis_sink_get_instance_private (GST_ARAVIS_SINK (object));
 
 	g_mutex_clear (&priv->camera_mutex);
+	g_mutex_clear (&priv->config_mutex);
 	g_clear_pointer (&priv->interface_name, g_free);
 	g_clear_pointer (&priv->serial_number, g_free);
 	g_clear_pointer (&priv->genicam_filename, g_free);
@@ -824,5 +927,8 @@ gst_aravis_sink_init (GstAravisSink *sink)
 	priv->default_width = 640;
 	priv->default_height = 480;
 	priv->default_pixel_format = ARV_PIXEL_FORMAT_MONO_16;
+	priv->element = GST_ELEMENT (sink);
+	priv->reconfigure_pending = FALSE;
 	g_mutex_init (&priv->camera_mutex);
+	g_mutex_init (&priv->config_mutex);
 }

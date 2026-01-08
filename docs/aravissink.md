@@ -59,6 +59,8 @@ gst-launch-1.0 videotestsrc ! \
 - The sink uses the fake camera register map (same addresses as `arv-fake-camera.xml`), so your GenICam XML should match those registers.
 - Stream destination is controlled by the client writing `ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET` and `ARV_GVBS_STREAM_CHANNEL_0_PORT_OFFSET`.
 - Once caps are negotiated, the sink updates width/height/pixel format to match the negotiated caps.
+- GVCP writes to width/height/pixel format or frame period trigger a `RECONFIGURE` event upstream and post a
+  `aravissink-reconfigure` application message on the bus with `width`, `height`, `format`, and `framerate`.
 
 ## Multiple instances
 
