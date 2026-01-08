@@ -324,6 +324,7 @@ progs = [
   [ 'arv-test', 		['arvtest.c'] + arv_test_resources],
   [ 'arv-camera-test',		'arvcameratest.c'],
   [ 'arv-fake-gv-camera', 	'arvfakegvcamera.c'],
+  [ 'arv-gvcp-proxy',		['arvgvcpproxy.c', 'arvgvcpproxy-backend.c'] ],
 ]
 
 foreach p: progs
