@@ -3,11 +3,13 @@ gst_enabled = true
 gst_plugin_dir = get_option ('libdir') / 'gstreamer-1.0'
 
 gst_sources = [
-	'gstaravis.c'
+	'gstaravis.c',
+	'gstaravissink.c'
 ]
 
 gst_headers = [
-	'gstaravis.h'
+	'gstaravis.h',
+	'gstaravissink.h'
 ]
 
 gst_c_args = [

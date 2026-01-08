@@ -37,6 +37,7 @@
  */
 
 #include <gstaravis.h>
+#include <gstaravissink.h>
 #include <arvgvspprivate.h>
 #include <time.h>
 #include <string.h>
@@ -1208,7 +1209,10 @@ gst_aravis_class_init (GstAravisClass * klass)
 static gboolean
 plugin_init (GstPlugin * plugin)
 {
-        return gst_element_register (plugin, "aravissrc", GST_RANK_NONE, GST_TYPE_ARAVIS);
+	if (!gst_element_register (plugin, "aravissrc", GST_RANK_NONE, GST_TYPE_ARAVIS))
+		return FALSE;
+
+	return gst_element_register (plugin, "aravissink", GST_RANK_NONE, GST_TYPE_ARAVIS_SINK);
 }
 
 #define PACKAGE "aravis"
@@ -1216,7 +1220,7 @@ plugin_init (GstPlugin * plugin)
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
 		   GST_VERSION_MINOR,
 		   aravis,
-		   "Aravis Video Source",
+		   "Aravis Video Source/Sink",
 		   plugin_init,
 		   ARAVIS_VERSION,
 		   "LGPL",
