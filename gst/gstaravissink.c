@@ -57,13 +57,10 @@ typedef struct {
 	gint cancel;
 
 	guint16 frame_id;
-	gboolean byteswap;
 	guint32 width;
 	guint32 height;
 	ArvPixelFormat pixel_format;
 
-	guint8 *swap_buffer;
-	gsize swap_buffer_size;
 	guint8 *packet_buffer;
 	gsize packet_buffer_size;
 } GstAravisSinkPrivate;
@@ -427,8 +424,6 @@ gst_aravis_sink_stop (GstBaseSink *sink)
 	g_clear_object (&priv->controller_address);
 	g_clear_object (&priv->camera);
 
-	g_clear_pointer (&priv->swap_buffer, g_free);
-	priv->swap_buffer_size = 0;
 	g_clear_pointer (&priv->packet_buffer, g_free);
 	priv->packet_buffer_size = 0;
 
@@ -462,7 +457,6 @@ gst_aravis_sink_set_caps (GstBaseSink *sink, GstCaps *caps)
 		return FALSE;
 	}
 
-	priv->byteswap = g_strcmp0 (format_string, "GRAY16_BE") == 0;
 	priv->pixel_format = pixel_format;
 	priv->width = width;
 	priv->height = height;
@@ -482,19 +476,6 @@ gst_aravis_sink_set_caps (GstBaseSink *sink, GstCaps *caps)
 	}
 
 	return TRUE;
-}
-
-static void
-_byteswap_16 (guint8 *dst, const guint8 *src, gsize size)
-{
-	gsize i;
-
-	for (i = 0; i + 1 < size; i += 2) {
-		dst[i] = src[i + 1];
-		dst[i + 1] = src[i];
-	}
-	if (size % 2 != 0)
-		dst[size - 1] = src[size - 1];
 }
 
 static GstFlowReturn
@@ -547,15 +528,6 @@ gst_aravis_sink_render (GstBaseSink *sink, GstBuffer *buffer)
 
 	payload = map.data;
 	payload_size = map.size;
-
-	if (priv->byteswap) {
-		if (priv->swap_buffer_size < payload_size) {
-			priv->swap_buffer = g_realloc (priv->swap_buffer, payload_size);
-			priv->swap_buffer_size = payload_size;
-		}
-		_byteswap_16 (priv->swap_buffer, map.data, payload_size);
-		payload = priv->swap_buffer;
-	}
 
 	arv_fake_camera_read_register (priv->camera, ARV_GVBS_STREAM_CHANNEL_0_PACKET_SIZE_OFFSET,
 				       &packet_size_register);
@@ -719,7 +691,7 @@ gst_aravis_sink_class_init (GstAravisSinkClass *klass)
 					      "Emmanuel Pacaud <emmanuel.pacaud@free.fr>");
 
 	caps = gst_caps_from_string ("video/x-raw, "
-				     "format=(string){GRAY8,GRAY16_LE,GRAY16_BE,RGB}, "
+				     "format=(string){GRAY8,GRAY16_LE,RGB}, "
 				     "width=(int)[1,MAX], height=(int)[1,MAX]");
 	gst_element_class_add_pad_template (element_class,
 					    gst_pad_template_new ("sink", GST_PAD_SINK, GST_PAD_ALWAYS, caps));
@@ -742,7 +714,6 @@ gst_aravis_sink_init (GstAravisSink *sink)
 	priv->serial_number = g_strdup (GST_ARAVIS_SINK_DEFAULT_SERIAL);
 	priv->genicam_filename = NULL;
 	priv->frame_id = 0;
-	priv->byteswap = FALSE;
 	priv->pixel_format = ARV_PIXEL_FORMAT_MONO_8;
 	g_mutex_init (&priv->camera_mutex);
 }
