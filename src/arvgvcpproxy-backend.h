@@ -20,8 +20,6 @@ typedef struct {
 	gboolean (*write_memory) (ArvGvcpProxyBackend *backend, guint32 address, guint32 size, const void *buffer);
 	gboolean (*read_register) (ArvGvcpProxyBackend *backend, guint32 address, guint32 *value);
 	gboolean (*write_register) (ArvGvcpProxyBackend *backend, guint32 address, guint32 value);
-	void (*stream_config_changed) (ArvGvcpProxyBackend *backend, guint32 stream_ip,
-				       guint16 stream_port, guint32 packet_size);
 	void (*stream_config_changed_ex) (ArvGvcpProxyBackend *backend, guint32 stream_ip,
 					  guint16 stream_port, guint32 packet_size,
 					  const guint8 mac[6], gboolean is_multicast);

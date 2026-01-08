@@ -53,7 +53,6 @@ See `src/arvgvcpproxy-backend.h` for the interface:
 - `write_memory(address, size, buffer)`
 - `read_register(address, value)`
 - `write_register(address, value)`
-- `stream_config_changed(stream_ip, stream_port, packet_size)`
 - `stream_config_changed_ex(stream_ip, stream_port, packet_size, mac, is_multicast)`
 - `set_inet_address(address)`
 - `destroy()`
@@ -74,7 +73,7 @@ Clients (Aravis) will typically:
 - Write stream destination IP and port (stream channel 0 registers).
 - Write `AcquisitionStart` to begin streaming.
 
-Your backend should ensure those GVBS registers are implemented. If you want to forward stream destination settings to PL logic, implement `stream_config_changed` and apply the values whenever the GVBS stream registers are updated.
+Your backend should ensure those GVBS registers are implemented. To forward stream destination settings to PL logic, implement `stream_config_changed_ex` and apply the values whenever the GVBS stream registers are updated.
 
 ## Multicast notes
 

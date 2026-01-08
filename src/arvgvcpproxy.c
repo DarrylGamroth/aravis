@@ -131,8 +131,7 @@ _maybe_notify_stream_config (ArvGvcpProxyBackend *backend, guint32 address)
 	gboolean is_multicast = FALSE;
 	guint32 ip_be;
 
-	if (backend->vtable->stream_config_changed == NULL &&
-	    backend->vtable->stream_config_changed_ex == NULL)
+	if (backend->vtable->stream_config_changed_ex == NULL)
 		return;
 
 	if (address != ARV_GVBS_STREAM_CHANNEL_0_IP_ADDRESS_OFFSET &&
@@ -161,11 +160,8 @@ _maybe_notify_stream_config (ArvGvcpProxyBackend *backend, guint32 address)
 		mac[5] = ip_be & 0xff;
 	}
 
-	if (backend->vtable->stream_config_changed != NULL)
-		backend->vtable->stream_config_changed (backend, stream_ip, (guint16) stream_port, packet_size);
-	if (backend->vtable->stream_config_changed_ex != NULL)
-		backend->vtable->stream_config_changed_ex (backend, stream_ip, (guint16) stream_port, packet_size,
-							    mac, is_multicast);
+	backend->vtable->stream_config_changed_ex (backend, stream_ip, (guint16) stream_port, packet_size,
+						    mac, is_multicast);
 }
 
 static void
