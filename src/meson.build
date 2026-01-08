@@ -325,7 +325,8 @@ progs = [
   [ 'arv-camera-test',		'arvcameratest.c'],
   [ 'arv-fake-gv-camera', 	'arvfakegvcamera.c'],
   [ 'arv-gvcp-proxy',		['arvgvcpproxy.c', 'arvgvcpproxy-backend.c',
-				 'arvgvcp.c', 'arvnetwork.c'] ],
+				 'arvgvcp.c', 'arvnetwork.c', 'arvdebug.c', 'arvmisc.c',
+				 library_enums, library_private_enums] ],
 ]
 
 foreach p: progs
