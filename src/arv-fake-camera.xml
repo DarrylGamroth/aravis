@@ -21,6 +21,7 @@
 		<pFeature>DeviceControl</pFeature>
 		<pFeature>ImageFormatControl</pFeature>
 		<pFeature>AcquisitionControl</pFeature>
+		<pFeature>EventControl</pFeature>
 		<pFeature>TransportLayerControl</pFeature>
 		<pFeature>Debug</pFeature>
 	</Category>
@@ -266,6 +267,50 @@
 		<pFeature>ExposureTimeAbs</pFeature>
 	</Category>
 
+	<!-- Event control -->
+
+	<Category Name="EventControl" NameSpace="Standard">
+		<pFeature>EventSelector</pFeature>
+		<pFeature>EventNotification</pFeature>
+	</Category>
+
+	<Enumeration Name="EventSelector" NameSpace="Standard">
+		<DisplayName>Event selector</DisplayName>
+		<EnumEntry Name="FrameStart" NameSpace="Standard">
+			<Value>0</Value>
+		</EnumEntry>
+		<pValue>EventSelectorRegister</pValue>
+	</Enumeration>
+
+	<IntReg Name="EventSelectorRegister" NameSpace="Custom">
+		<Address>0x0b00</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<Enumeration Name="EventNotification" NameSpace="Standard">
+		<DisplayName>Event notification</DisplayName>
+		<EnumEntry Name="Off" NameSpace="Standard">
+			<Value>0</Value>
+		</EnumEntry>
+		<EnumEntry Name="On" NameSpace="Standard">
+			<Value>1</Value>
+		</EnumEntry>
+		<pValue>EventNotificationRegister</pValue>
+	</Enumeration>
+
+	<IntReg Name="EventNotificationRegister" NameSpace="Custom">
+		<Address>0x0b04</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
 	<Command Name="AcquisitionStart" NameSpace="Standard">
 		<Description>Start acquisition.</Description>
 		<pValue>AcquisitionCommandRegister</pValue>
@@ -497,6 +542,9 @@
 
 	<Category Name="TransportLayerControl" NameSpace="Standard">
 		<pFeature>PayloadSize</pFeature>
+		<pFeature>GevSCDA</pFeature>
+		<pFeature>GevSCPHostPort</pFeature>
+		<pFeature>GevSCPSPacketSize</pFeature>
 	</Category>
 
 	<IntSwissKnife Name="PayloadSize" NameSpace="Standard">
@@ -505,6 +553,45 @@
 		<pVariable Name="PIXELFORMAT">PixelFormatRegister</pVariable>
 		<Formula>WIDTH * HEIGHT * ((PIXELFORMAT>>16)&amp;0xFF) / 8</Formula>
 	</IntSwissKnife>
+
+	<Integer Name="GevSCDA" NameSpace="Standard">
+		<pValue>GevSCDARegister</pValue>
+	</Integer>
+
+	<IntReg Name="GevSCDARegister" NameSpace="Custom">
+		<Address>0x0d18</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<Integer Name="GevSCPHostPort" NameSpace="Standard">
+		<pValue>GevSCPHostPortRegister</pValue>
+	</Integer>
+
+	<IntReg Name="GevSCPHostPortRegister" NameSpace="Custom">
+		<Address>0x0d00</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
+
+	<Integer Name="GevSCPSPacketSize" NameSpace="Standard">
+		<pValue>GevSCPSPacketSizeRegister</pValue>
+	</Integer>
+
+	<IntReg Name="GevSCPSPacketSizeRegister" NameSpace="Custom">
+		<Address>0x0d04</Address>
+		<Length>4</Length>
+		<AccessMode>RW</AccessMode>
+		<pPort>Device</pPort>
+		<Sign>Unsigned</Sign>
+		<Endianess>BigEndian</Endianess>
+	</IntReg>
 
 	<Integer Name="TLParamsLocked">
 		<ToolTip> Indicates whether a live grab is under way</ToolTip>

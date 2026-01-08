@@ -839,6 +839,8 @@ arv_fake_camera_set_inet_address (ArvFakeCamera *camera, GInetAddress *address)
 
 	arv_fake_camera_write_memory (camera, ARV_GVBS_CURRENT_IP_ADDRESS_OFFSET,
 				      g_inet_address_get_native_size (address), (char *) bytes);
+	arv_fake_camera_write_memory (camera, ARV_GVBS_CURRENT_IP_ADDRESS_0_OFFSET,
+				      g_inet_address_get_native_size (address), (char *) bytes);
 }
 
 guint32
@@ -1083,12 +1085,18 @@ arv_fake_camera_new_full (const char *serial_number, const char *genicam_filenam
 	arv_fake_camera_write_register (fake_camera, ARV_GVBS_TIMESTAMP_TICK_FREQUENCY_HIGH_OFFSET, 0);
 	arv_fake_camera_write_register (fake_camera, ARV_GVBS_TIMESTAMP_TICK_FREQUENCY_LOW_OFFSET, 1000000000);
 	arv_fake_camera_write_register (fake_camera, ARV_GVBS_CONTROL_CHANNEL_PRIVILEGE_OFFSET, 0);
+	arv_fake_camera_write_register (fake_camera, ARV_GVBS_CONTROL_CHANNEL_PRIVILEGE_2_OFFSET, 0);
+	arv_fake_camera_write_register (fake_camera, ARV_GVBS_EVENT_SELECTOR_OFFSET, 0);
+	arv_fake_camera_write_register (fake_camera, ARV_GVBS_EVENT_NOTIFICATION_OFFSET, 0);
 
 	arv_fake_camera_write_register (fake_camera, ARV_GVBS_STREAM_CHANNEL_0_PACKET_SIZE_OFFSET, 1400);
 
 	arv_fake_camera_write_register (fake_camera, ARV_GVBS_N_NETWORK_INTERFACES_OFFSET, 1);
+	arv_fake_camera_write_register (fake_camera, ARV_GVBS_CURRENT_IP_ADDRESS_0_OFFSET, 0);
 
 	arv_fake_camera_write_register (fake_camera, ARV_GVBS_N_STREAM_CHANNELS_OFFSET, 1);
+	arv_fake_camera_write_register (fake_camera, ARV_GVBS_MESSAGE_CHANNEL_0_CONTROL_OFFSET, 0);
+	arv_fake_camera_write_register (fake_camera, ARV_GVBS_STREAM_CHANNEL_0_CONTROL_OFFSET, 0);
 
 	arv_fake_camera_write_register (fake_camera, ARV_FAKE_CAMERA_REGISTER_TEST, ARV_FAKE_CAMERA_TEST_REGISTER_DEFAULT);
 
