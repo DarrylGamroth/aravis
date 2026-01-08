@@ -4,7 +4,14 @@ gst_plugin_dir = get_option ('libdir') / 'gstreamer-1.0'
 
 gst_sources = [
 	'gstaravis.c',
-	'gstaravissink.c'
+	'gstaravissink.c',
+	'../src/arvgvcp.c',
+	'../src/arvgvsp.c',
+	'../src/arvnetwork.c',
+	'../src/arvdebug.c',
+	'../src/arvmisc.c',
+	library_enums,
+	library_private_enums
 ]
 
 gst_headers = [
@@ -14,7 +21,8 @@ gst_headers = [
 
 gst_c_args = [
 	'-DPACKAGE_LOCALE_DIR=@0@'.format(get_option ('prefix')),
-	'-DG_LOG_DOMAIN="Aravis"'
+	'-DG_LOG_DOMAIN="Aravis"',
+	'-DARAVIS_COMPILATION'
 ]
 
 gst_plugin_filename = 'gstaravis.@0@'.format (aravis_api_version)
