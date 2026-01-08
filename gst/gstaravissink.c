@@ -779,7 +779,7 @@ gst_aravis_sink_class_init (GstAravisSinkClass *klass)
 					 g_param_spec_uint ("default-height",
 							    "Default Height",
 							    "Default height before caps negotiation",
-							    1, G_MAXUINT, 512,
+							    1, G_MAXUINT, 480,
 							    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 	g_object_class_install_property (gobject_class,
 					 PROP_DEFAULT_PIXEL_FORMAT,
@@ -821,7 +821,7 @@ gst_aravis_sink_init (GstAravisSink *sink)
 	priv->frame_id = 0;
 	priv->pixel_format = ARV_PIXEL_FORMAT_MONO_8;
 	priv->default_width = 640;
-	priv->default_height = 512;
+	priv->default_height = 480;
 	priv->default_pixel_format = ARV_PIXEL_FORMAT_MONO_16;
 	g_mutex_init (&priv->camera_mutex);
 }

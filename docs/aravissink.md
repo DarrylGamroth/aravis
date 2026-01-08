@@ -24,7 +24,7 @@ Other formats should be converted upstream with `videoconvert`.
 - `serial` (string): Device serial number exposed via GVCP discovery.
 - `genicam` (string): Path to GenICam XML file to expose.
 - `default-width` (uint): Default width before caps negotiation (default `640`).
-- `default-height` (uint): Default height before caps negotiation (default `512`).
+- `default-height` (uint): Default height before caps negotiation (default `480`).
 - `default-pixel-format` (string): Default pixel format before caps negotiation (`Mono8`, `Mono16`, `RGB8`; default `Mono16`).
 
 ## Default GenICam XML
