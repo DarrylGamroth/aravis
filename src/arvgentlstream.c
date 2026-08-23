@@ -103,6 +103,7 @@ enum
 typedef struct {
         ArvGenTLDataStream *gentl_data_stream;
         BUFFER_HANDLE gentl_buffer;
+	ArvBuffer *arv_buffer;
 } ArvGenTLStreamBufferData;
 
 typedef struct {
@@ -132,6 +133,7 @@ typedef struct {
 
 typedef struct {
 	ArvGenTLDevice *gentl_device;
+	ArvGenTLModule *gentl;
         ArvGenTLDataStream *gentl_data_stream;
 	EVENT_HANDLE event_handle;
 	uint64_t timestamp_tick_frequency;
@@ -140,6 +142,8 @@ typedef struct {
 
 	GThread *thread;
 	ArvGenTLStreamThreadData *thread_data;
+	gboolean caller_polling;
+	gboolean caller_polling_active;
 } ArvGenTLStreamPrivate;
 
 struct _ArvGenTLStream {
@@ -545,6 +549,86 @@ _buffer_data_destroy_func (gpointer data)
         g_free (buffer_data);
 }
 
+static void
+_set_stream_error (GError **error, const char *operation, GC_ERROR gc_error)
+{
+	g_set_error (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+		     "%s failed (%s)", operation, arv_gentl_gc_error_to_string (gc_error));
+}
+
+static gboolean
+_start_caller_polling (ArvGenTLStream *stream, GError **error)
+{
+	ArvGenTLStreamPrivate *priv = arv_gentl_stream_get_instance_private (stream);
+	ArvGenTLModule *gentl = priv->gentl;
+	GC_ERROR gc_error;
+
+	if (priv->caller_polling_active)
+		return TRUE;
+
+	gc_error = gentl->GCRegisterEvent (priv->gentl_data_stream->data_stream,
+					  EVENT_NEW_BUFFER, &priv->event_handle);
+	if (gc_error != GC_ERR_SUCCESS) {
+		_set_stream_error (error, "GCRegisterEvent[NEW_BUFFER]", gc_error);
+		return FALSE;
+	}
+
+	gc_error = gentl->DSStartAcquisition (priv->gentl_data_stream->data_stream,
+					     ACQ_START_FLAGS_DEFAULT, GENTL_INFINITE);
+	if (gc_error != GC_ERR_SUCCESS) {
+		gentl->GCUnregisterEvent (priv->gentl_data_stream->data_stream, EVENT_NEW_BUFFER);
+		priv->event_handle = NULL;
+		_set_stream_error (error, "DSStartAcquisition", gc_error);
+		return FALSE;
+	}
+
+	priv->caller_polling_active = TRUE;
+	if (priv->thread_data->callback != NULL)
+		priv->thread_data->callback (priv->thread_data->callback_data,
+					     ARV_STREAM_CALLBACK_TYPE_INIT, NULL);
+	return TRUE;
+}
+
+static gboolean
+_stop_caller_polling (ArvGenTLStream *stream, GError **error)
+{
+	ArvGenTLStreamPrivate *priv = arv_gentl_stream_get_instance_private (stream);
+	ArvGenTLModule *gentl = priv->gentl;
+	GC_ERROR first_error = GC_ERR_SUCCESS;
+	GC_ERROR gc_error;
+
+	if (!priv->caller_polling_active)
+		return TRUE;
+
+	gc_error = gentl->DSStopAcquisition (priv->gentl_data_stream->data_stream,
+					    ACQ_STOP_FLAGS_DEFAULT);
+	if (gc_error != GC_ERR_SUCCESS && gc_error != GC_ERR_RESOURCE_IN_USE)
+		first_error = gc_error;
+
+	gc_error = gentl->GCUnregisterEvent (priv->gentl_data_stream->data_stream,
+					    EVENT_NEW_BUFFER);
+	if (gc_error != GC_ERR_SUCCESS && first_error == GC_ERR_SUCCESS)
+		first_error = gc_error;
+
+	gc_error = gentl->DSFlushQueue (priv->gentl_data_stream->data_stream,
+				       ACQ_QUEUE_ALL_DISCARD);
+	if (gc_error != GC_ERR_SUCCESS && first_error == GC_ERR_SUCCESS)
+		first_error = gc_error;
+
+	priv->event_handle = NULL;
+	priv->caller_polling_active = FALSE;
+	if (priv->thread_data->callback != NULL)
+		priv->thread_data->callback (priv->thread_data->callback_data,
+					     ARV_STREAM_CALLBACK_TYPE_EXIT, NULL);
+
+	if (first_error != GC_ERR_SUCCESS) {
+		_set_stream_error (error, "stopping caller-polled acquisition", first_error);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 static gboolean
 arv_gentl_stream_start_acquisition (ArvStream *stream, GError **error)
 {
@@ -555,6 +639,9 @@ arv_gentl_stream_start_acquisition (ArvStream *stream, GError **error)
 	ArvGenTLModule *gentl = arv_gentl_system_get_gentl(gentl_system);
         ArvBuffer *buffer;
 	GC_ERROR gc_error;
+
+	if (priv->caller_polling)
+		return _start_caller_polling (gentl_stream, error);
 
 	g_return_val_if_fail (priv->thread == NULL, FALSE);
 	g_return_val_if_fail (priv->thread_data != NULL, FALSE);
@@ -578,6 +665,7 @@ arv_gentl_stream_start_acquisition (ArvStream *stream, GError **error)
                                         buffer_data = g_new0 (ArvGenTLStreamBufferData, 1);
                                         buffer_data->gentl_buffer = gentl_buffer;
                                         buffer_data->gentl_data_stream = arv_gentl_data_stream_ref (priv->gentl_data_stream);
+					buffer_data->arv_buffer = buffer;
 
                                         g_object_set_data_full (G_OBJECT (buffer), "gentl-buffer-data",
                                                                 buffer_data, _buffer_data_destroy_func);
@@ -631,6 +719,9 @@ arv_gentl_stream_stop_acquisition(ArvStream *stream, GError **error)
 	ArvGenTLSystem *gentl_system = arv_gentl_device_get_system(priv->gentl_device);
 	ArvGenTLModule *gentl = arv_gentl_system_get_gentl(gentl_system);
 	GC_ERROR gc_error;
+
+	if (priv->caller_polling)
+		return _stop_caller_polling (gentl_stream, error);
 
 	g_return_val_if_fail (priv->thread != NULL, FALSE);
 	g_return_val_if_fail (priv->thread_data != NULL, FALSE);
@@ -687,6 +778,7 @@ arv_gentl_stream_create_buffers (ArvStream *stream, guint n_buffers, size_t size
                 buffer_data = g_new0 (ArvGenTLStreamBufferData, 1);
                 buffer_data->gentl_buffer = gentl_buffer;
                 buffer_data->gentl_data_stream = arv_gentl_data_stream_ref (priv->gentl_data_stream);
+		buffer_data->arv_buffer = buffer;
 
                 buffer = arv_buffer_new_full(size, data, user_data, user_data_destroy_func);
                 g_object_set_data_full (G_OBJECT (buffer), "gentl-buffer-data", buffer_data, _buffer_data_destroy_func);
@@ -694,6 +786,273 @@ arv_gentl_stream_create_buffers (ArvStream *stream, guint n_buffers, size_t size
         }
 
         return gc_error == GC_ERR_SUCCESS;
+}
+
+/**
+ * arv_gentl_stream_set_caller_polling:
+ * @stream: an #ArvGenTLStream
+ * @enabled: whether the caller owns completion polling
+ * @error: return location for a #GError
+ *
+ * Selects caller-owned completion polling. This mode must be selected while the
+ * stream is stopped and before buffers are prepared. The normal Aravis stream
+ * queues and receiving thread are not used in this mode.
+ *
+ * Returns: %TRUE on success
+ *
+ * Since: 0.10.0
+ */
+
+gboolean
+arv_gentl_stream_set_caller_polling (ArvGenTLStream *stream, gboolean enabled, GError **error)
+{
+	ArvGenTLStreamPrivate *priv;
+	gint n_input_buffers;
+	gint n_output_buffers;
+	gint n_buffer_filling;
+
+	g_return_val_if_fail (ARV_IS_GENTL_STREAM (stream), FALSE);
+
+	priv = arv_gentl_stream_get_instance_private (stream);
+	if (priv->thread != NULL || priv->caller_polling_active) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "Caller polling can only be changed while the stream is stopped");
+		return FALSE;
+	}
+
+	if (enabled) {
+		arv_stream_get_n_owned_buffers (ARV_STREAM (stream), &n_input_buffers,
+						&n_output_buffers, &n_buffer_filling);
+		if (n_input_buffers != 0 || n_output_buffers != 0 || n_buffer_filling != 0) {
+			g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+					     "Caller polling requires empty ArvStream queues");
+			return FALSE;
+		}
+	}
+
+	priv->caller_polling = enabled;
+	return TRUE;
+}
+
+/**
+ * arv_gentl_stream_prepare_buffer:
+ * @stream: an #ArvGenTLStream in caller-polling mode
+ * @buffer: an externally allocated #ArvBuffer
+ * @error: return location for a #GError
+ *
+ * Announces @buffer to the GenTL producer without placing it in an Aravis
+ * queue. The stream retains the GenTL announcement until @buffer is destroyed.
+ * Preparation is restricted to the stopped control path.
+ *
+ * Returns: %TRUE on success
+ *
+ * Since: 0.10.0
+ */
+
+gboolean
+arv_gentl_stream_prepare_buffer (ArvGenTLStream *stream, ArvBuffer *buffer, GError **error)
+{
+	ArvGenTLStreamPrivate *priv;
+	ArvGenTLStreamBufferData *buffer_data;
+	ArvGenTLStreamBufferData *new_buffer_data;
+	ArvGenTLModule *gentl;
+	GC_ERROR gc_error;
+
+	g_return_val_if_fail (ARV_IS_GENTL_STREAM (stream), FALSE);
+	g_return_val_if_fail (ARV_IS_BUFFER (buffer), FALSE);
+
+	priv = arv_gentl_stream_get_instance_private (stream);
+	if (!priv->caller_polling || priv->caller_polling_active || priv->thread != NULL) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "Buffers can only be prepared while caller polling is enabled and stopped");
+		return FALSE;
+	}
+
+	buffer_data = g_object_get_data (G_OBJECT (buffer), "gentl-buffer-data");
+	if (buffer_data != NULL) {
+		if (buffer_data->gentl_data_stream == priv->gentl_data_stream)
+			return TRUE;
+
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_INVALID_PARAMETER,
+				     "Buffer is already prepared for another GenTL stream");
+		return FALSE;
+	}
+
+	if (buffer->priv->data == NULL || buffer->priv->allocated_size == 0) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_INVALID_PARAMETER,
+				     "Buffer must reference non-empty external storage");
+		return FALSE;
+	}
+
+	gentl = priv->gentl;
+	new_buffer_data = g_new0 (ArvGenTLStreamBufferData, 1);
+	new_buffer_data->arv_buffer = buffer;
+	gc_error = gentl->DSAnnounceBuffer (priv->gentl_data_stream->data_stream,
+					  buffer->priv->data, buffer->priv->allocated_size,
+					  new_buffer_data, &new_buffer_data->gentl_buffer);
+	if (gc_error != GC_ERR_SUCCESS) {
+		g_free (new_buffer_data);
+		_set_stream_error (error, "DSAnnounceBuffer", gc_error);
+		return FALSE;
+	}
+
+	new_buffer_data->gentl_data_stream = arv_gentl_data_stream_ref (priv->gentl_data_stream);
+	g_object_set_data_full (G_OBJECT (buffer), "gentl-buffer-data",
+				new_buffer_data, _buffer_data_destroy_func);
+
+	/* Avoid allocating part metadata for the common single-image payload on completion. */
+	arv_buffer_set_n_parts (buffer, 1);
+	return TRUE;
+}
+
+/**
+ * arv_gentl_stream_queue_buffer:
+ * @stream: an #ArvGenTLStream in caller-polling mode
+ * @buffer: a buffer prepared with arv_gentl_stream_prepare_buffer()
+ * @error: return location for a #GError
+ *
+ * Gives @buffer to the GenTL producer. This function does not use the Aravis
+ * input queue and may be called before acquisition starts or after a completion.
+ *
+ * Returns: %TRUE on success
+ *
+ * Since: 0.10.0
+ */
+
+gboolean
+arv_gentl_stream_queue_buffer (ArvGenTLStream *stream, ArvBuffer *buffer, GError **error)
+{
+	ArvGenTLStreamPrivate *priv;
+	ArvGenTLStreamBufferData *buffer_data;
+	ArvGenTLModule *gentl;
+	GC_ERROR gc_error;
+
+	g_return_val_if_fail (ARV_IS_GENTL_STREAM (stream), FALSE);
+	g_return_val_if_fail (ARV_IS_BUFFER (buffer), FALSE);
+
+	priv = arv_gentl_stream_get_instance_private (stream);
+	if (!priv->caller_polling) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "Caller polling is not enabled");
+		return FALSE;
+	}
+
+	buffer_data = g_object_get_data (G_OBJECT (buffer), "gentl-buffer-data");
+	if (buffer_data == NULL || buffer_data->gentl_data_stream != priv->gentl_data_stream) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_INVALID_PARAMETER,
+				     "Buffer is not prepared for this GenTL stream");
+		return FALSE;
+	}
+
+	gentl = priv->gentl;
+	gc_error = gentl->DSQueueBuffer (priv->gentl_data_stream->data_stream,
+					buffer_data->gentl_buffer);
+	if (gc_error != GC_ERR_SUCCESS) {
+		_set_stream_error (error, "DSQueueBuffer", gc_error);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+/**
+ * arv_gentl_stream_poll_buffer:
+ * @stream: an active #ArvGenTLStream in caller-polling mode
+ * @buffer: (out) (transfer none): return location for the completed buffer
+ * @error: return location for a #GError
+ *
+ * Performs exactly one zero-timeout GenTL completion poll. An empty poll is an
+ * ordinary result and does not create a #GError. On completion, buffer metadata
+ * and any configured stream callback are updated synchronously on the caller's
+ * thread. Payload copying is rejected: the GenTL producer must DMA directly
+ * into the storage announced by arv_gentl_stream_prepare_buffer().
+ *
+ * Returns: an #ArvGenTLStreamPollResult
+ *
+ * Since: 0.10.0
+ */
+
+ArvGenTLStreamPollResult
+arv_gentl_stream_poll_buffer (ArvGenTLStream *stream, ArvBuffer **buffer, GError **error)
+{
+	ArvGenTLStreamPrivate *priv;
+	ArvGenTLStreamThreadData *thread_data;
+	ArvGenTLStreamBufferData *buffer_data;
+	ArvGenTLModule *gentl;
+	EVENT_NEW_BUFFER_DATA event_data = {NULL, NULL};
+	ArvBuffer *completed_buffer;
+	void *gentl_base;
+	size_t size = sizeof (event_data);
+	GC_ERROR gc_error;
+
+	g_return_val_if_fail (ARV_IS_GENTL_STREAM (stream), ARV_GENTL_STREAM_POLL_ERROR);
+	g_return_val_if_fail (buffer != NULL, ARV_GENTL_STREAM_POLL_ERROR);
+
+	*buffer = NULL;
+	priv = arv_gentl_stream_get_instance_private (stream);
+	if (!priv->caller_polling_active) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "Caller-polled acquisition is not active");
+		return ARV_GENTL_STREAM_POLL_ERROR;
+	}
+
+	gentl = priv->gentl;
+	gc_error = gentl->EventGetData (priv->event_handle, &event_data, &size, 0);
+	if (gc_error == GC_ERR_TIMEOUT)
+		return ARV_GENTL_STREAM_POLL_EMPTY;
+	if (gc_error != GC_ERR_SUCCESS) {
+		_set_stream_error (error, "EventGetData[NEW_BUFFER]", gc_error);
+		return ARV_GENTL_STREAM_POLL_ERROR;
+	}
+	if (size < sizeof (event_data) || event_data.UserPointer == NULL) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "GenTL completion did not contain the announced buffer identity");
+		return ARV_GENTL_STREAM_POLL_ERROR;
+	}
+
+	buffer_data = event_data.UserPointer;
+	if (buffer_data->gentl_data_stream != priv->gentl_data_stream ||
+	    buffer_data->gentl_buffer != event_data.BufferHandle) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "GenTL completion does not match a buffer prepared by this stream");
+		return ARV_GENTL_STREAM_POLL_ERROR;
+	}
+	completed_buffer = buffer_data->arv_buffer;
+	if (!ARV_IS_BUFFER (completed_buffer)) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "GenTL completion returned an invalid buffer identity");
+		return ARV_GENTL_STREAM_POLL_ERROR;
+	}
+
+	if (!_gentl_buffer_info_ptr (gentl, priv->gentl_data_stream->data_stream,
+				     buffer_data->gentl_buffer, BUFFER_INFO_BASE, &gentl_base) ||
+	    gentl_base != completed_buffer->priv->data) {
+		g_set_error_literal (error, ARV_DEVICE_ERROR, ARV_DEVICE_ERROR_STREAM_ERROR,
+				     "GenTL producer did not use the announced external storage");
+		return ARV_GENTL_STREAM_POLL_ERROR;
+	}
+
+	thread_data = priv->thread_data;
+	if (thread_data->callback != NULL)
+		thread_data->callback (thread_data->callback_data,
+				      ARV_STREAM_CALLBACK_TYPE_START_BUFFER, completed_buffer);
+
+	_gentl_buffer_to_arv_buffer (gentl, priv->gentl_data_stream->data_stream,
+				     buffer_data->gentl_buffer, completed_buffer,
+				     priv->timestamp_tick_frequency);
+
+	if (completed_buffer->priv->status == ARV_BUFFER_STATUS_SUCCESS)
+		thread_data->n_completed_buffers += 1;
+	else
+		thread_data->n_failures += 1;
+	thread_data->n_transferred_bytes += completed_buffer->priv->allocated_size;
+
+	if (thread_data->callback != NULL)
+		thread_data->callback (thread_data->callback_data,
+				      ARV_STREAM_CALLBACK_TYPE_BUFFER_DONE, completed_buffer);
+
+	*buffer = completed_buffer;
+	return ARV_GENTL_STREAM_POLL_BUFFER;
 }
 
 /**
@@ -729,6 +1088,8 @@ arv_gentl_stream_init (ArvGenTLStream *gentl_stream)
 	priv->event_handle = NULL;
 	priv->gentl_data_stream = NULL;
 	priv->n_buffers = ARV_GENTL_STREAM_DEFAULT_N_BUFFERS;
+	priv->caller_polling = FALSE;
+	priv->caller_polling_active = FALSE;
 }
 
 static void
@@ -779,6 +1140,7 @@ arv_gentl_stream_constructed (GObject *object)
                       NULL);
 
 	priv->gentl_data_stream = arv_gentl_data_stream_new (priv->gentl_device);
+	priv->gentl = arv_gentl_system_get_gentl (arv_gentl_device_get_system (priv->gentl_device));
 	priv->timestamp_tick_frequency = arv_gentl_device_get_timestamp_tick_frequency(priv->gentl_device);
 	priv->thread_data->stream = stream;
 
@@ -798,7 +1160,7 @@ arv_gentl_stream_finalize (GObject *object)
 	ArvGenTLStream *gentl_stream = ARV_GENTL_STREAM (object);
 	ArvGenTLStreamPrivate *priv = arv_gentl_stream_get_instance_private (gentl_stream);
 
-        if (priv->thread != NULL)
+        if (priv->thread != NULL || priv->caller_polling_active)
                 arv_gentl_stream_stop_acquisition (ARV_STREAM(gentl_stream), NULL);
 
 	if (priv->thread_data != NULL) {

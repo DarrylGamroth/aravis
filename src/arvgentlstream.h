@@ -36,6 +36,26 @@ G_BEGIN_DECLS
 #define ARV_TYPE_GENTL_STREAM (arv_gentl_stream_get_type ())
 ARV_API G_DECLARE_FINAL_TYPE (ArvGenTLStream, arv_gentl_stream, ARV, GENTL_STREAM, ArvStream)
 
+typedef enum {
+	ARV_GENTL_STREAM_POLL_ERROR = -1,
+	ARV_GENTL_STREAM_POLL_EMPTY = 0,
+	ARV_GENTL_STREAM_POLL_BUFFER = 1
+} ArvGenTLStreamPollResult;
+
+ARV_API gboolean	arv_gentl_stream_set_caller_polling	(ArvGenTLStream *stream,
+							 gboolean enabled,
+							 GError **error);
+ARV_API gboolean	arv_gentl_stream_prepare_buffer		(ArvGenTLStream *stream,
+							 ArvBuffer *buffer,
+							 GError **error);
+ARV_API gboolean	arv_gentl_stream_queue_buffer		(ArvGenTLStream *stream,
+							 ArvBuffer *buffer,
+							 GError **error);
+ARV_API ArvGenTLStreamPollResult
+			arv_gentl_stream_poll_buffer		(ArvGenTLStream *stream,
+							 ArvBuffer **buffer,
+							 GError **error);
+
 G_END_DECLS
 
 #endif
