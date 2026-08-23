@@ -248,6 +248,7 @@ _gentl_buffer_to_arv_buffer(ArvGenTLModule *gentl, DS_HANDLE datastream, BUFFER_
 {
 	size_t payload_type = PAYLOAD_TYPE_UNKNOWN;
 	bool8_t has_chunks = FALSE;
+	bool8_t is_incomplete = FALSE;
 	uint32_t num_parts;
 	size_t data_size, data_type, actual_size, image_offset, width, height, x_offset, y_offset, x_padding, y_padding;
 	uint64_t source_id, pixel_format, frame_id, timestamp = 0;
@@ -401,7 +402,10 @@ _gentl_buffer_to_arv_buffer(ArvGenTLModule *gentl, DS_HANDLE datastream, BUFFER_
 		arv_buffer->priv->parts[0].y_padding = y_padding;
 	}
 
-	arv_buffer->priv->status = ARV_BUFFER_STATUS_SUCCESS;
+	_gentl_buffer_info_bool8(gentl, datastream, gentl_buffer,
+				BUFFER_INFO_IS_INCOMPLETE, &is_incomplete);
+	arv_buffer->priv->status = is_incomplete ?
+		ARV_BUFFER_STATUS_MISSING_PACKETS : ARV_BUFFER_STATUS_SUCCESS;
 }
 
 static void
