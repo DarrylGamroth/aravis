@@ -120,7 +120,7 @@ DEV_HANDLE 		arv_gentl_system_open_device_handle     (ArvGenTLSystem *system,
                                                                  const char *device_id);
 void 			arv_gentl_system_close_device_handle    (ArvGenTLSystem *system,
                                                                  const char *interface_id,
-                                                                 DEV_HANDLE *device_handle);
+                                                                 DEV_HANDLE device_handle);
 
 G_END_DECLS
 

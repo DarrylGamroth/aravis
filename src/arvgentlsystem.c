@@ -358,22 +358,34 @@ arv_gentl_system_open_device_handle(ArvGenTLSystem *system, const char *interfac
 	ArvGenTLModule *gentl = &priv->gentl;
 	IF_HANDLE interface_handle = NULL;
 	DEV_HANDLE device_handle = NULL;
+	bool8_t changed = FALSE;
 	GC_ERROR error;
 
 	/* Get interface handle */
 	interface_handle = arv_gentl_system_open_interface_handle(system, interface_id);
+	if (interface_handle == NULL)
+		return NULL;
+
+	/* Device IDs are only valid after updating a newly opened GenTL interface. */
+	error = gentl->IFUpdateDeviceList(interface_handle, &changed, 100);
+	if (error != GC_ERR_SUCCESS) {
+		arv_warning_interface("IFUpdateDeviceList: error %d", error);
+		arv_gentl_system_close_interface_handle(system, interface_id);
+		return NULL;
+	}
 
 	arv_info_interface("IFOpenDevice: '%s'", device_id);
 	error = gentl->IFOpenDevice(interface_handle, device_id, DEVICE_ACCESS_CONTROL, &device_handle);
 	if (error != GC_ERR_SUCCESS) {
 		arv_warning_interface("IFOpenDevice: error %d", error);
+		arv_gentl_system_close_interface_handle(system, interface_id);
 		return NULL;
 	}
 	return device_handle;
 }
 
 void
-arv_gentl_system_close_device_handle(ArvGenTLSystem *system, const char *interface_id, DEV_HANDLE *device_handle)
+arv_gentl_system_close_device_handle(ArvGenTLSystem *system, const char *interface_id, DEV_HANDLE device_handle)
 {
 	ArvGenTLSystemPrivate *priv = arv_gentl_system_get_instance_private (system);
 	ArvGenTLModule *gentl = &priv->gentl;

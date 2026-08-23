@@ -574,7 +574,8 @@ arv_gentl_device_finalize (GObject *object)
                 g_thread_join (priv->event_thread);
 #endif
 
-	arv_gentl_system_close_device_handle(priv->gentl_system, priv->interface_id, priv->device_handle);
+	if (priv->device_handle != NULL)
+		arv_gentl_system_close_device_handle(priv->gentl_system, priv->interface_id, priv->device_handle);
 
 	g_clear_object (&priv->genicam);
 	g_clear_pointer (&priv->genicam_xml, g_free);
