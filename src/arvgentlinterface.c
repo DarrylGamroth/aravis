@@ -235,6 +235,8 @@ _discover (ArvGenTLInterface *gentl_interface, GArray *device_ids)
 
 			interface_type = _gentl_get_info_str(gentl->TLGetInterfaceInfo,
                                                              system_handle, interface_id, INTERFACE_INFO_TLTYPE);
+			if (interface_type == NULL)
+				interface_type = g_strdup ("Unknown");
 
 			interface_handle = arv_gentl_system_open_interface_handle(gentl_system, interface_id);
 			if (interface_handle == NULL) {
@@ -252,6 +254,8 @@ _discover (ArvGenTLInterface *gentl_interface, GArray *device_ids)
 				ArvInterfaceDeviceIds *ids;
 
 				device_id = _gentl_get_id(gentl->IFGetDeviceID, interface_handle, j);
+				if (device_id == NULL)
+					continue;
 
                                 tl_vendor = _gentl_get_tl_info_str(gentl, system_handle, TL_INFO_VENDOR);
 
@@ -263,6 +267,16 @@ _discover (ArvGenTLInterface *gentl_interface, GArray *device_ids)
                                                              interface_handle, device_id, DEVICE_INFO_VENDOR);
 				serial_nbr =  _gentl_get_info_str(gentl->IFGetDeviceInfo,
                                                                   interface_handle, device_id, DEVICE_INFO_SERIAL_NUMBER);
+				if (tl_vendor == NULL)
+					tl_vendor = g_strdup ("GenTL");
+				if (id == NULL)
+					id = g_strdup (device_id);
+				if (vendor == NULL)
+					vendor = g_strdup (tl_vendor);
+				if (model == NULL)
+					model = g_strdup ("Unknown");
+				if (serial_nbr == NULL)
+					serial_nbr = g_strdup (id);
 
 				device_infos =  arv_gentl_interface_device_infos_new(gentl_system, tl_vendor, interface_id, id,
                                                                                     vendor, model, serial_nbr);
@@ -299,6 +313,7 @@ _discover (ArvGenTLInterface *gentl_interface, GArray *device_ids)
 					g_free(serial_nbr);
 				}
 				g_clear_pointer(&device_id, g_free);
+				g_clear_pointer(&tl_vendor, g_free);
 
 				arv_gentl_interface_device_infos_unref(device_infos);
 			}
