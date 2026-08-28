@@ -100,6 +100,7 @@ typedef struct {
 	gboolean received;
         gboolean resend_requested;
 	guint64 abs_timeout_us;
+	gsize payload_end;
 } ArvGvStreamPacketData;
 
 typedef struct {
@@ -111,6 +112,7 @@ typedef struct {
         gsize received_size;
 
 	gint32 last_valid_packet;
+	gsize committed_size;
 	guint64 first_packet_time_us;
 	guint64 last_packet_time_us;
 
@@ -124,6 +126,31 @@ typedef struct {
 
 	gboolean extended_ids;
 } ArvGvStreamFrameData;
+
+static void
+_buffer_progress_begin (ArvBuffer *buffer, guint64 frame_id)
+{
+	g_atomic_int_set (&buffer->priv->gv_progress_active, FALSE);
+	g_atomic_int_inc (&buffer->priv->gv_progress_generation);
+	g_atomic_int_set (&buffer->priv->gv_progress_frame_id_low, (gint) (guint32) frame_id);
+	g_atomic_int_set (&buffer->priv->gv_progress_frame_id_high, (gint) (guint32) (frame_id >> 32));
+	g_atomic_pointer_set (&buffer->priv->gv_progress_committed_size, GSIZE_TO_POINTER (0));
+	g_atomic_int_set (&buffer->priv->gv_progress_supported, FALSE);
+	g_atomic_int_set (&buffer->priv->gv_progress_active, TRUE);
+}
+static void
+_buffer_progress_end (ArvBuffer *buffer)
+{
+	g_atomic_int_set (&buffer->priv->gv_progress_active, FALSE);
+}
+
+static void
+_buffer_progress_publish (ArvGvStreamFrameData *frame)
+{
+	if (g_atomic_int_get (&frame->buffer->priv->gv_progress_supported))
+		g_atomic_pointer_set (&frame->buffer->priv->gv_progress_committed_size,
+				      GSIZE_TO_POINTER (frame->committed_size));
+}
 
 struct _ArvGvStreamThreadData {
 	GCancellable *cancellable;
@@ -402,6 +429,7 @@ _find_frame_data (ArvGvStreamThreadData *thread_data,
 	frame->buffer = buffer;
 	_update_socket (thread_data, frame->buffer);
 	frame->buffer->priv->status = ARV_BUFFER_STATUS_FILLING;
+	_buffer_progress_begin (frame->buffer, frame_id);
 
 	frame->first_packet_time_us = time_us;
 	frame->last_packet_time_us = time_us;
@@ -413,7 +441,7 @@ _find_frame_data (ArvGvStreamThreadData *thread_data,
 	    frame->buffer != NULL)
 		thread_data->callback (thread_data->callback_data,
 				       ARV_STREAM_CALLBACK_TYPE_START_BUFFER,
-				       NULL);
+				       frame->buffer);
 
 	thread_data->last_frame_id = frame_id;
 
@@ -458,6 +486,9 @@ _process_data_leader (ArvGvStreamThreadData *thread_data,
 	frame->buffer->priv->chunk_endianness = G_BIG_ENDIAN;
 
 	frame->buffer->priv->system_timestamp_ns = g_get_real_time() * 1000LL;
+	g_atomic_int_set (&frame->buffer->priv->gv_progress_supported,
+			  frame->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE);
+	_buffer_progress_publish (frame);
 
         if (frame->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE ||
             frame->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_EXTENDED_CHUNK_DATA) {
@@ -539,14 +570,16 @@ _process_data_leader (ArvGvStreamThreadData *thread_data,
 
 static void
 _process_payload_block (ArvGvStreamThreadData *thread_data,
-		     ArvGvStreamFrameData *frame,
-		     const ArvGvspPacket *packet,
-                     size_t packet_size,
-		     guint32 packet_id)
+			ArvGvStreamFrameData *frame,
+			const ArvGvspPacket *packet,
+			size_t packet_size,
+			guint32 packet_id)
 {
 	size_t block_size;
-	ptrdiff_t block_offset;
-	ptrdiff_t block_end;
+	gsize block_offset;
+	gsize block_end;
+	gsize payload_block_size;
+	gsize protocol_overhead;
 	gboolean extended_ids;
 
 	if (frame->buffer->priv->status != ARV_BUFFER_STATUS_FILLING)
@@ -561,31 +594,47 @@ _process_payload_block (ArvGvStreamThreadData *thread_data,
 	extended_ids = arv_gvsp_packet_has_extended_ids (packet, packet_size);
 
 	block_size = arv_gvsp_payload_packet_get_data_size (packet, packet_size);
-	block_offset = (packet_id - 1) * (thread_data->scps_packet_size -
-                                         ARV_GVSP_PAYLOAD_PACKET_PROTOCOL_OVERHEAD (extended_ids));
-	block_end = block_size + block_offset;
+	protocol_overhead = ARV_GVSP_PAYLOAD_PACKET_PROTOCOL_OVERHEAD (extended_ids);
+	if (thread_data->scps_packet_size <= protocol_overhead) {
+		frame->buffer->priv->status = ARV_BUFFER_STATUS_SIZE_MISMATCH;
+		return;
+	}
+	payload_block_size = thread_data->scps_packet_size - protocol_overhead;
+	if (packet_id - 1 > G_MAXSIZE / payload_block_size) {
+		frame->buffer->priv->status = ARV_BUFFER_STATUS_SIZE_MISMATCH;
+		return;
+	}
+	block_offset = (packet_id - 1) * payload_block_size;
+	if (block_offset >= frame->buffer->priv->allocated_size) {
+		thread_data->n_size_mismatch_errors++;
+		frame->buffer->priv->status = ARV_BUFFER_STATUS_SIZE_MISMATCH;
+		return;
+	}
+	block_end = block_size > frame->buffer->priv->allocated_size - block_offset ?
+			    frame->buffer->priv->allocated_size :
+			    block_offset + block_size;
 
-	if (block_end > frame->buffer->priv->allocated_size) {
-		arv_info_stream_thread ("[GvStream::process_data_block] %" G_GINTPTR_FORMAT " unexpected bytes in packet %u "
-					 " for frame %" G_GUINT64_FORMAT,
-					 block_end - frame->buffer->priv->allocated_size,
-					 packet_id, frame->frame_id);
+	if (block_size > frame->buffer->priv->allocated_size - block_offset) {
+		arv_info_stream_thread ("[GvStream::process_data_block] %" G_GSIZE_FORMAT " unexpected bytes in packet %u "
+					" for frame %" G_GUINT64_FORMAT,
+					block_size - (frame->buffer->priv->allocated_size - block_offset),
+					packet_id, frame->frame_id);
 		thread_data->n_size_mismatch_errors++;
 
-		block_end = frame->buffer->priv->allocated_size;
 		block_size = block_end - block_offset;
 	}
 
 	memcpy (((char *) frame->buffer->priv->data) + block_offset,
-                arv_gvsp_packet_get_data (packet, packet_size),
-                block_size);
+		arv_gvsp_packet_get_data (packet, packet_size),
+		block_size);
+	frame->packet_data[packet_id].payload_end = block_end;
 
-        frame->received_size += block_size;
+	frame->received_size += block_size;
 
 	if (frame->packet_data[packet_id].resend_requested) {
 		thread_data->n_resent_packets++;
 		arv_debug_stream_thread ("[GvStream::process_data_block] Received resent packet %u for frame %" G_GUINT64_FORMAT,
-				       packet_id, frame->frame_id);
+					 packet_id, frame->frame_id);
 	}
 }
 
@@ -766,6 +815,7 @@ _close_frame (ArvGvStreamThreadData *thread_data,
 	    frame->buffer->priv->status != ARV_BUFFER_STATUS_ABORTED)
 		thread_data->n_missing_packets += (int) frame->n_packets - (frame->last_valid_packet + 1);
 
+	_buffer_progress_end (frame->buffer);
 	arv_stream_push_output_buffer (thread_data->stream, frame->buffer);
 	if (thread_data->callback != NULL)
 		thread_data->callback (thread_data->callback_data,
@@ -940,16 +990,6 @@ _process_packet (ArvGvStreamThreadData *thread_data, const ArvGvspPacket *packet
 		} else {
 			ArvGvspContentType content_type;
 
-                        if (packet_id < frame->n_packets) {
-                                frame->packet_data[packet_id].received = TRUE;
-                        }
-
-                        /* Keep track of last packet of a continuous block starting from packet 0 */
-                        for (i = frame->last_valid_packet + 1; i < frame->n_packets; i++)
-                                if (!frame->packet_data[i].received)
-                                        break;
-                        frame->last_valid_packet = i - 1;
-
                         content_type = arv_gvsp_packet_get_content_type (packet, packet_size);
 
                         arv_gvsp_packet_debug (packet, packet_size,
@@ -980,6 +1020,21 @@ _process_packet (ArvGvStreamThreadData *thread_data, const ArvGvspPacket *packet
                                         thread_data->n_ignored_bytes += packet_size;
                                         break;
                         }
+
+                        /* A packet becomes visible only after its payload copy is complete. */
+                        if (packet_id < frame->n_packets &&
+                            frame->buffer->priv->status == ARV_BUFFER_STATUS_FILLING)
+                                frame->packet_data[packet_id].received = TRUE;
+
+                        /* Keep track of the contiguous block starting at the leader. */
+                        for (i = frame->last_valid_packet + 1; i < frame->n_packets; i++) {
+                                if (!frame->packet_data[i].received)
+                                        break;
+                                frame->committed_size = MAX (frame->committed_size,
+                                                             frame->packet_data[i].payload_end);
+                        }
+                        frame->last_valid_packet = i - 1;
+                        _buffer_progress_publish (frame);
 
                         _missing_packet_check (thread_data, frame, packet_id, time_us);
 		}
@@ -1409,6 +1464,66 @@ arv_gv_stream_get_port (ArvGvStream *gv_stream)
 	g_return_val_if_fail (ARV_IS_GV_STREAM (gv_stream), 0);
 
 	return priv->thread_data->stream_port;
+}
+
+/**
+ * arv_gv_stream_get_buffer_progress:
+ * @gv_stream: an #ArvGvStream
+ * @buffer: an #ArvBuffer announced to @gv_stream
+ * @progress: (out): receive progress snapshot
+ *
+ * Reads a coherent snapshot of the receive progress for @buffer. A successful
+ * snapshot does not imply that a frame is active or that its payload supports
+ * progressive access; inspect @progress.active and @progress.supported.
+ *
+ * @progress.committed_size is a contiguous prefix. The native receive thread
+ * publishes it only after the corresponding payload copies have completed.
+ *
+ * Returns: %TRUE if a coherent snapshot was obtained
+ *
+ * Since: 0.10.0
+ */
+gboolean
+arv_gv_stream_get_buffer_progress (ArvGvStream *gv_stream,
+				   ArvBuffer *buffer,
+				   ArvGvStreamBufferProgress *progress)
+{
+	guint attempt;
+
+	g_return_val_if_fail (ARV_IS_GV_STREAM (gv_stream), FALSE);
+	g_return_val_if_fail (ARV_IS_BUFFER (buffer), FALSE);
+	g_return_val_if_fail (progress != NULL, FALSE);
+
+	for (attempt = 0; attempt < 3; attempt++) {
+		gint generation_before;
+		gint generation_after;
+		gint active_before;
+		gint active_after;
+		guint32 frame_id_low;
+		guint32 frame_id_high;
+		gsize committed_size;
+		gboolean supported;
+
+		generation_before = g_atomic_int_get (&buffer->priv->gv_progress_generation);
+		active_before = g_atomic_int_get (&buffer->priv->gv_progress_active);
+		supported = g_atomic_int_get (&buffer->priv->gv_progress_supported);
+		frame_id_low = (guint32) g_atomic_int_get (&buffer->priv->gv_progress_frame_id_low);
+		frame_id_high = (guint32) g_atomic_int_get (&buffer->priv->gv_progress_frame_id_high);
+		committed_size = GPOINTER_TO_SIZE (
+			g_atomic_pointer_get (&buffer->priv->gv_progress_committed_size));
+		active_after = g_atomic_int_get (&buffer->priv->gv_progress_active);
+		generation_after = g_atomic_int_get (&buffer->priv->gv_progress_generation);
+
+		if (generation_before == generation_after && active_before == active_after) {
+			progress->frame_id = ((guint64) frame_id_high << 32) | frame_id_low;
+			progress->committed_size = committed_size;
+			progress->active = active_after;
+			progress->supported = supported;
+			return TRUE;
+		}
+	}
+
+	return FALSE;
 }
 
 static gboolean

@@ -63,6 +63,14 @@ typedef struct {
 	guint64 timestamp_ns;
 	guint64 system_timestamp_ns;
 
+	/* Native GV stream progress. All fields are accessed atomically. */
+	gint gv_progress_generation;
+	gint gv_progress_active;
+	gint gv_progress_supported;
+	gint gv_progress_frame_id_low;
+	gint gv_progress_frame_id_high;
+	gpointer gv_progress_committed_size;
+
         guint n_parts;
         ArvBufferPartInfos *parts;
 

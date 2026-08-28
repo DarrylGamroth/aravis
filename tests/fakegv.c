@@ -25,12 +25,13 @@ discovery_test (void)
         test_camera = arv_camera_new ("Aravis-GVTest", NULL);
         g_assert (test_camera == NULL);
 
-        arv_gv_interface_set_discovery_interface_name(NULL);
+	arv_gv_interface_set_discovery_interface_name ("lo");
 
         arv_update_device_list();
 
         discovery_iface = arv_gv_interface_dup_discovery_interface_name();
-        g_assert (discovery_iface == NULL);
+	g_assert_cmpstr (discovery_iface, ==, "lo");
+	g_free (discovery_iface);
 
         test_camera = arv_camera_new ("Aravis-GVTest", NULL);
         g_assert (ARV_IS_CAMERA(test_camera));
@@ -206,6 +207,99 @@ stream_test (void)
 	g_usleep (2000000);
 }
 
+typedef struct {
+	ArvGvStream *stream;
+	gint start_count;
+	gint callback_error;
+} ProgressCallbackData;
+
+static void
+progress_stream_cb (void *user_data, ArvStreamCallbackType type, ArvBuffer *buffer)
+{
+	ProgressCallbackData *data = user_data;
+	ArvGvStreamBufferProgress progress;
+
+	if (type != ARV_STREAM_CALLBACK_TYPE_START_BUFFER)
+		return;
+	if (buffer == NULL || data->stream == NULL ||
+	    !arv_gv_stream_get_buffer_progress (data->stream, buffer, &progress) ||
+	    !progress.active)
+		g_atomic_int_set (&data->callback_error, TRUE);
+	g_atomic_int_inc (&data->start_count);
+}
+
+static void
+progressive_stream_test (void)
+{
+	ProgressCallbackData callback_data = {
+		0,
+	};
+	ArvGvStreamBufferProgress progress = {
+		0,
+	};
+	ArvBuffer *buffers[3];
+	ArvBuffer *completed;
+	ArvStream *stream;
+	GError *error = NULL;
+	gint64 deadline;
+	gsize payload;
+	gboolean observed_partial = FALSE;
+	guint i;
+
+	arv_camera_gv_set_packet_delay (camera, 100000, &error);
+	g_assert_no_error (error);
+
+	stream = arv_camera_create_stream (camera, progress_stream_cb,
+					   &callback_data, NULL, &error);
+	g_assert_no_error (error);
+	g_assert_true (ARV_IS_GV_STREAM (stream));
+	callback_data.stream = ARV_GV_STREAM (stream);
+
+	payload = arv_camera_get_payload (camera, &error);
+	g_assert_no_error (error);
+	for (i = 0; i < G_N_ELEMENTS (buffers); i++) {
+		buffers[i] = arv_buffer_new (payload, NULL);
+		arv_stream_push_buffer (stream, buffers[i]);
+	}
+
+	g_assert_true (arv_camera_start_acquisition (camera, &error));
+	g_assert_no_error (error);
+	deadline = g_get_monotonic_time () + 2 * G_TIME_SPAN_SECOND;
+	while (!observed_partial && g_get_monotonic_time () < deadline) {
+		for (i = 0; i < G_N_ELEMENTS (buffers); i++) {
+			if (arv_gv_stream_get_buffer_progress (ARV_GV_STREAM (stream),
+							       buffers[i], &progress) &&
+			    progress.active &&
+			    progress.supported && progress.committed_size > 0 &&
+			    progress.committed_size < payload) {
+				observed_partial = TRUE;
+				break;
+			}
+		}
+		if (!observed_partial)
+			g_usleep (100);
+	}
+	g_assert_true (observed_partial);
+	g_assert_cmpuint (progress.committed_size, <=, payload);
+
+	completed = arv_stream_timeout_pop_buffer (stream, 2 * G_TIME_SPAN_SECOND);
+	g_assert_nonnull (completed);
+	g_assert_true (arv_gv_stream_get_buffer_progress (ARV_GV_STREAM (stream),
+							  completed, &progress));
+	g_assert_false (progress.active);
+	g_assert_true (progress.supported);
+	g_assert_cmpuint (progress.committed_size, ==, payload);
+	g_assert_cmpint (g_atomic_int_get (&callback_data.start_count), >, 0);
+	g_assert_cmpint (g_atomic_int_get (&callback_data.callback_error), ==, 0);
+
+	g_assert_true (arv_camera_stop_acquisition (camera, &error));
+	g_assert_no_error (error);
+	g_object_unref (completed);
+	g_object_unref (stream);
+	arv_camera_gv_set_packet_delay (camera, 0, &error);
+	g_assert_no_error (error);
+}
+
 #define N_BUFFERS	5
 
 static struct {
@@ -273,6 +367,7 @@ main (int argc, char *argv[])
 	g_test_init (&argc, &argv, NULL);
 
 	arv_set_fake_camera_genicam_filename (GENICAM_FILENAME);
+	arv_gv_interface_set_discovery_interface_name ("lo");
 
 	simulator = arv_gv_fake_camera_new ("127.0.0.1", "GVTest");
 	g_assert (ARV_IS_GV_FAKE_CAMERA (simulator));
@@ -286,6 +381,7 @@ main (int argc, char *argv[])
 	g_test_add_func ("/fakegv/device_registers", register_test);
 	g_test_add_func ("/fakegv/acquisition", acquisition_test);
 	g_test_add_func ("/fakegv/stream", stream_test);
+	g_test_add_func ("/fakegv/progressive_stream", progressive_stream_test);
 	g_test_add_func ("/fakegv/dynamic_roi", dynamic_roi_test);
 
 	result = g_test_run();

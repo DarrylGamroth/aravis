@@ -67,5 +67,15 @@
 		<para>
 			In the video stream reception code, client must take care to check if all frame packets are present, and ask for packet resend for missing ones, using a GVCP packet resend command.
 		</para>
+
+		<sect2>
+			<title>Progressive buffer access</title>
+			<para>
+				arv_gv_stream_get_buffer_progress() returns a coherent snapshot for a caller-owned buffer. For an active ordinary image payload, committed_size is the contiguous payload prefix whose packet copies have completed. The receive thread will not write those bytes again for the current frame. A caller must retain ownership of the buffer, process only complete application-level units inside that prefix, and wait for normal stream completion before requeuing it. Multipart and chunk payloads do not currently support progressive access.
+			</para>
+			<para>
+				This facility is derived from the existing Aravis receive implementation and fake-camera tests. It does not depend on external normative specification text.
+			</para>
+		</sect2>
 	</chapter>
 </part>
