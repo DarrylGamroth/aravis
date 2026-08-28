@@ -75,6 +75,25 @@ if get_option('tests')
 
 	endif
 
+	gv_stream_benchmark = executable (
+		'arv-gv-stream-benchmark', 'arvgvstreambenchmark.c',
+		c_args: ['-DGENICAM_FILENAME="@0@/src/arv-fake-camera.xml"'.format (meson.project_source_root ())],
+		link_with: aravis_library,
+		dependencies: aravis_dependencies,
+		include_directories: [library_inc])
+
+	if packet_socket_enabled and host_machine.system() == 'linux'
+		unshare = find_program ('unshare', required: false)
+		ip = find_program ('ip', required: false)
+		sh = find_program ('sh')
+		if unshare.found() and ip.found()
+			test ('gv-packet-socket', sh,
+				args: [files ('run-gv-packet-socket-test.sh'),
+				       unshare.full_path(), ip.full_path(), gv_stream_benchmark],
+				suite: ['network', 'packet-socket'], timeout: 60)
+		endif
+	endif
+
 	examples = [
 		['arv-network-test',		'arvnetworktest.c'],
 		['arv-device-test',		'arvdevicetest.c'],

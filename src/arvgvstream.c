@@ -61,6 +61,11 @@
 #define ARV_GV_STREAM_DISCARD_LATE_FRAME_THRESHOLD	100
 #define ARV_GV_STREAM_BUFFER_SIZE_PROTOCOL_OVERHEAD     1024 /* Some room for protocol overhead (IP + UDP + GV) */
 #define ARV_GV_STREAM_MIN_BUFFER_SIZE                   20 * 1024
+#define ARV_GV_STREAM_PACKET_SOCKET_BLOCK_SIZE_DEFAULT  (1U << 21)
+#define ARV_GV_STREAM_PACKET_SOCKET_BLOCK_COUNT_DEFAULT 16U
+#define ARV_GV_STREAM_PACKET_SOCKET_FRAME_SIZE          1024U
+#define ARV_GV_STREAM_PACKET_SOCKET_BLOCK_TIMEOUT_DEFAULT_MS 5U
+#define ARV_GV_STREAM_PACKET_SOCKET_STATS_BLOCK_INTERVAL 1024U
 
 enum {
 	ARV_GV_STREAM_PROPERTY_0,
@@ -70,7 +75,10 @@ enum {
 	ARV_GV_STREAM_PROPERTY_PACKET_REQUEST_RATIO,
 	ARV_GV_STREAM_PROPERTY_INITIAL_PACKET_TIMEOUT,
 	ARV_GV_STREAM_PROPERTY_PACKET_TIMEOUT,
-	ARV_GV_STREAM_PROPERTY_FRAME_RETENTION
+	ARV_GV_STREAM_PROPERTY_FRAME_RETENTION,
+	ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_SIZE,
+	ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_COUNT,
+	ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_TIMEOUT
 } ArvGvStreamProperties;
 
 typedef struct _ArvGvStreamThreadData ArvGvStreamThreadData;
@@ -188,6 +196,9 @@ struct _ArvGvStreamThreadData {
 	guint64 last_frame_id;
 
 	gboolean use_packet_socket;
+	guint packet_socket_block_size;
+	guint packet_socket_block_count;
+	guint packet_socket_block_timeout_ms;
 
 	/* Statistics */
 
@@ -212,6 +223,16 @@ struct _ArvGvStreamThreadData {
 
         guint64 n_transferred_bytes;
         guint64 n_ignored_bytes;
+
+	guint64 packet_socket_active;
+	guint64 packet_socket_ring_size;
+	guint64 n_packet_socket_blocks;
+	guint64 n_packet_socket_polls;
+	guint64 n_packet_socket_poll_timeouts;
+	guint64 n_packet_socket_packets;
+	guint64 n_packet_socket_drops;
+	guint64 n_packet_socket_freezes;
+	guint64 n_packet_socket_malformed_packets;
 
 	ArvHistogram *histogram;
 	guint32 statistic_count;
@@ -1046,10 +1067,26 @@ _process_packet (ArvGvStreamThreadData *thread_data, const ArvGvspPacket *packet
 	return frame;
 }
 
+/* Receive backends retain ownership of the packet memory for the duration of
+ * this call. Frame processing copies any payload that must outlive the view. */
+typedef struct {
+	const ArvGvspPacket *packet;
+	gsize size;
+	guint64 timestamp_us;
+} ArvGvStreamPacketView;
+
+static void
+_process_packet_view (ArvGvStreamThreadData *thread_data, const ArvGvStreamPacketView *view)
+{
+	ArvGvStreamFrameData *frame;
+
+	frame = _process_packet (thread_data, view->packet, view->size, view->timestamp_us);
+	_check_frame_completion (thread_data, view->timestamp_us, frame);
+}
+
 static void
 _loop (ArvGvStreamThreadData *thread_data)
 {
-	ArvGvStreamFrameData *frame;
 	ArvGvspPacket *packet_buffers;
 	GPollFD poll_fd[2];
 	guint64 time_us;
@@ -1116,11 +1153,13 @@ _loop (ArvGvStreamThreadData *thread_data)
                         if (G_LIKELY(n_msgs > 0)) {
                                 time_us = g_get_monotonic_time ();
                                 for (i = 0; i < n_msgs; i++) {
-                                        frame = _process_packet (thread_data,
-                                                                 packet_iv[i].buffer,
-                                                                 packet_im[i].bytes_received,
-                                                                 time_us);
-                                        _check_frame_completion (thread_data, time_us, frame);
+					ArvGvStreamPacketView view = {
+						.packet = packet_iv[i].buffer,
+						.size = packet_im[i].bytes_received,
+						.timestamp_us = time_us,
+					};
+
+					_process_packet_view (thread_data, &view);
                                 }
                         } else {
                                 arv_warning_stream_thread ("[GvStream::loop] receive_messages failed: %s",
@@ -1144,7 +1183,7 @@ _loop (ArvGvStreamThreadData *thread_data)
 
 #if ARAVIS_HAS_PACKET_SOCKET
 
-static void
+static gboolean
 _set_socket_filter (int socket, guint32 source_ip, guint32 source_port, guint32 destination_ip, guint32 destination_port)
 {
 
@@ -1239,8 +1278,13 @@ _set_socket_filter (int socket, guint32 source_ip, guint32 source_port, guint32 
 	arv_info_stream_thread ("[GvStream::set_socket_filter] source ip = 0x%08x - port = %d - dest ip = 0x%08x - port %d",
 				 source_ip, source_port, destination_ip, destination_port);
 
-	if (setsockopt(socket, SOL_SOCKET, SO_ATTACH_FILTER, &bpf_prog, sizeof(bpf_prog)) != 0)
-		arv_warning_stream_thread ("[GvStream::set_socket_filter] Failed to attach Beckerley Packet Filter to stream socket");
+	if (setsockopt(socket, SOL_SOCKET, SO_ATTACH_FILTER, &bpf_prog, sizeof(bpf_prog)) != 0) {
+		arv_warning_stream_thread ("[GvStream::set_socket_filter] Failed to attach Berkeley Packet Filter to stream socket: %s",
+					   strerror (errno));
+		return FALSE;
+	}
+
+	return TRUE;
 }
 
 static unsigned
@@ -1279,50 +1323,140 @@ typedef struct {
 } ArvGvStreamBlockDescriptor;
 
 static void
+_packet_socket_update_statistics (ArvGvStreamThreadData *thread_data, int fd)
+{
+	struct tpacket_stats_v3 stats = {0};
+	socklen_t length = sizeof (stats);
+
+	if (getsockopt (fd, SOL_PACKET, PACKET_STATISTICS, &stats, &length) == 0) {
+		thread_data->n_packet_socket_packets += stats.tp_packets;
+		thread_data->n_packet_socket_drops += stats.tp_drops;
+		thread_data->n_packet_socket_freezes += stats.tp_freeze_q_cnt;
+	}
+}
+
+static gboolean
+_packet_socket_get_gvsp_packet (const struct tpacket3_hdr *header,
+				const guint8 *block_end,
+				const ArvGvspPacket **packet,
+				size_t *packet_size)
+{
+	const guint8 *header_bytes = (const guint8 *) header;
+	const guint8 *capture_start;
+	const guint8 *capture_end;
+	const struct iphdr *ip;
+	const struct udphdr *udp;
+	gsize block_remaining;
+	gsize ip_header_size;
+	gsize ip_size;
+	gsize udp_size;
+
+	if (header_bytes > block_end || (gsize) (block_end - header_bytes) < sizeof (*header))
+		return FALSE;
+
+	block_remaining = block_end - header_bytes;
+	if (header->tp_mac > block_remaining || header->tp_snaplen > block_remaining - header->tp_mac)
+		return FALSE;
+
+	capture_start = header_bytes + header->tp_mac;
+	capture_end = capture_start + header->tp_snaplen;
+	if (header->tp_net < header->tp_mac ||
+	    header->tp_net - header->tp_mac > header->tp_snaplen ||
+	    header->tp_snaplen - (header->tp_net - header->tp_mac) < sizeof (*ip))
+		return FALSE;
+
+	ip = (const struct iphdr *) (header_bytes + header->tp_net);
+	if (ip->version != 4 || ip->protocol != IPPROTO_UDP || ip->ihl < 5)
+		return FALSE;
+
+	ip_header_size = ip->ihl * 4U;
+	if (ip_header_size > (gsize) (capture_end - (const guint8 *) ip) ||
+	    (gsize) (capture_end - (const guint8 *) ip) - ip_header_size < sizeof (*udp))
+		return FALSE;
+	ip_size = g_ntohs (ip->tot_len);
+	if (ip_size < ip_header_size + sizeof (*udp) ||
+	    ip_size > (gsize) (capture_end - (const guint8 *) ip))
+		return FALSE;
+
+	udp = (const struct udphdr *) ((const guint8 *) ip + ip_header_size);
+	udp_size = g_ntohs (udp->len);
+	if (udp_size < sizeof (*udp) || udp_size > ip_size - ip_header_size)
+		return FALSE;
+
+	*packet = (const ArvGvspPacket *) (udp + 1);
+	*packet_size = udp_size - sizeof (*udp);
+
+	return TRUE;
+}
+
+static gboolean
 _ring_buffer_loop (ArvGvStreamThreadData *thread_data)
 {
 	GPollFD poll_fd[2];
-	char *buffer;
-	struct tpacket_req3 req;
+	char *buffer = MAP_FAILED;
+	struct tpacket_req3 req = {0};
 	struct sockaddr_ll local_address = {0};
 	enum tpacket_versions version;
-	int fd;
+	int fd = -1;
 	unsigned block_id;
+	unsigned blocks_since_stats = 0;
 	const guint8 *bytes;
 	guint32 interface_address;
 	guint32 device_address;
-	gboolean use_poll;
+	gboolean use_poll = FALSE;
+	gboolean result = FALSE;
+	guint64 n_frames;
+	gsize ring_size;
+	long page_size;
 
 	arv_info_stream ("[GvStream::loop] Packet socket method");
 
 	fd = socket (PF_PACKET, SOCK_RAW, g_htons (ETH_P_ALL));
 	if (fd < 0) {
 		arv_warning_stream_thread ("[GvStream::loop] Failed to create AF_PACKET socket");
-		goto af_packet_error;
+		goto out;
 	}
 
 	version = TPACKET_V3;
 	if (setsockopt (fd, SOL_PACKET, PACKET_VERSION, &version, sizeof(version)) < 0) {
 		arv_warning_stream_thread ("[GvStream::loop] Failed to set packet version");
-		goto socket_option_error;
+		goto out;
 	}
 
-	req.tp_block_size = 1 << 21;
-	req.tp_frame_size = 1024;
-	req.tp_block_nr = 16;
-	req.tp_frame_nr = (req.tp_block_size * req.tp_block_nr) / req.tp_frame_size;
+	page_size = sysconf (_SC_PAGESIZE);
+	if (page_size <= 0 ||
+	    thread_data->packet_socket_block_size % (guint) page_size != 0 ||
+	    thread_data->packet_socket_block_size % ARV_GV_STREAM_PACKET_SOCKET_FRAME_SIZE != 0) {
+		arv_warning_stream_thread ("[GvStream::loop] Packet socket block size %u is not page and frame aligned",
+					   thread_data->packet_socket_block_size);
+		goto out;
+	}
+
+	n_frames = ((guint64) thread_data->packet_socket_block_size *
+		    thread_data->packet_socket_block_count) / ARV_GV_STREAM_PACKET_SOCKET_FRAME_SIZE;
+	if (n_frames > G_MAXUINT32 ||
+	    thread_data->packet_socket_block_size > G_MAXSIZE / thread_data->packet_socket_block_count) {
+		arv_warning_stream_thread ("[GvStream::loop] Packet socket ring configuration is too large");
+		goto out;
+	}
+
+	req.tp_block_size = thread_data->packet_socket_block_size;
+	req.tp_frame_size = ARV_GV_STREAM_PACKET_SOCKET_FRAME_SIZE;
+	req.tp_block_nr = thread_data->packet_socket_block_count;
+	req.tp_frame_nr = n_frames;
 	req.tp_sizeof_priv = 0;
-	req.tp_retire_blk_tov = 5;
+	req.tp_retire_blk_tov = thread_data->packet_socket_block_timeout_ms;
 	req.tp_feature_req_word = TP_FT_REQ_FILL_RXHASH;
 	if (setsockopt (fd, SOL_PACKET, PACKET_RX_RING, &req, sizeof(req)) < 0) {
-		arv_warning_stream_thread ("[GvStream::loop] Failed to set packet rx ring");
-		goto socket_option_error;
+		arv_warning_stream_thread ("[GvStream::loop] Failed to set packet rx ring: %s", strerror (errno));
+		goto out;
 	}
 
-	buffer = mmap (NULL, req.tp_block_size * req.tp_block_nr, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
+	ring_size = (gsize) req.tp_block_size * req.tp_block_nr;
+	buffer = mmap (NULL, ring_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, 0);
 	if (buffer == MAP_FAILED) {
-		arv_warning_stream_thread ("[GvStream::loop] Failed to map ring buffer");
-		goto map_error;
+		arv_warning_stream_thread ("[GvStream::loop] Failed to map ring buffer: %s", strerror (errno));
+		goto out;
 	}
 
 	bytes = g_inet_address_to_bytes (thread_data->interface_address);
@@ -1333,21 +1467,29 @@ _ring_buffer_loop (ArvGvStreamThreadData *thread_data)
 	local_address.sll_family   = AF_PACKET;
 	local_address.sll_protocol = g_htons(ETH_P_IP);
 	local_address.sll_ifindex  = _interface_index_from_address (interface_address);
+	if (local_address.sll_ifindex == 0) {
+		arv_warning_stream_thread ("[GvStream::loop] Failed to find the packet socket interface");
+		goto out;
+	}
 	local_address.sll_hatype   = 0;
 	local_address.sll_pkttype  = 0;
 	local_address.sll_halen    = 0;
 	if (bind (fd, (struct sockaddr *) &local_address, sizeof(local_address)) == -1) {
-		arv_warning_stream_thread ("[GvStream::loop] Failed to bind packet socket");
-		goto bind_error;
+		arv_warning_stream_thread ("[GvStream::loop] Failed to bind packet socket: %s", strerror (errno));
+		goto out;
 	}
 
-	_set_socket_filter (fd, device_address, thread_data->source_stream_port, interface_address, thread_data->stream_port);
+	if (!_set_socket_filter (fd, device_address, thread_data->source_stream_port,
+				 interface_address, thread_data->stream_port))
+		goto out;
 
 	poll_fd[0].fd = fd;
 	poll_fd[0].events =  G_IO_IN;
 	poll_fd[0].revents = 0;
 
 	use_poll = g_cancellable_make_pollfd (thread_data->cancellable, &poll_fd[1]);
+	thread_data->packet_socket_active = 1;
+	thread_data->packet_socket_ring_size = ring_size;
 
         g_mutex_lock (&thread_data->thread_started_mutex);
         thread_data->thread_started = TRUE;
@@ -1362,7 +1504,7 @@ _ring_buffer_loop (ArvGvStreamThreadData *thread_data)
 		time_us = g_get_monotonic_time ();
 
 		descriptor = (void *) (buffer + block_id * req.tp_block_size);
-		if ((descriptor->h1.block_status & TP_STATUS_USER) == 0) {
+		if ((__atomic_load_n (&descriptor->h1.block_status, __ATOMIC_ACQUIRE) & TP_STATUS_USER) == 0) {
                         int timeout_ms;
 			int n_events;
 			int errsv;
@@ -1375,50 +1517,82 @@ _ring_buffer_loop (ArvGvStreamThreadData *thread_data)
                                 timeout_ms = ARV_GV_STREAM_POLL_TIMEOUT_US / 1000;
 
 			do {
+				thread_data->n_packet_socket_polls++;
 				n_events = g_poll (poll_fd, use_poll ? 2 : 1,  timeout_ms);
 				errsv = errno;
 			} while (n_events < 0 && errsv == EINTR);
+			if (n_events < 0) {
+				arv_warning_stream_thread ("[GvStream::loop] Packet socket poll failed: %s",
+							   strerror (errsv));
+				break;
+			}
+			if (n_events == 0)
+				thread_data->n_packet_socket_poll_timeouts++;
 		} else {
-			ArvGvStreamFrameData *frame;
 			const struct tpacket3_hdr *header;
 			unsigned i;
 
-			header = (void *) (((char *) descriptor) + descriptor->h1.offset_to_first_pkt);
+			const guint8 *block_end = (const guint8 *) descriptor + req.tp_block_size;
+
+			if (descriptor->h1.offset_to_first_pkt > req.tp_block_size - sizeof (*header)) {
+				thread_data->n_packet_socket_malformed_packets += descriptor->h1.num_pkts;
+				goto release_block;
+			}
+
+			header = (const struct tpacket3_hdr *)
+				((const guint8 *) descriptor + descriptor->h1.offset_to_first_pkt);
 
 			for (i = 0; i < descriptor->h1.num_pkts; i++) {
-				const struct iphdr *ip;
 				const ArvGvspPacket *packet;
 				size_t size;
 
-				ip = (void *) (((char *) header) + header->tp_mac + ETH_HLEN);
-				packet = (void *) (((char *) ip) + sizeof (struct iphdr) + sizeof (struct udphdr));
-				size = g_ntohs (ip->tot_len) -  sizeof (struct iphdr) - sizeof (struct udphdr);
+				if (_packet_socket_get_gvsp_packet (header, block_end, &packet, &size)) {
+					ArvGvStreamPacketView view = {
+						.packet = packet,
+						.size = size,
+						.timestamp_us = time_us,
+					};
 
-				frame = _process_packet (thread_data, packet, size, time_us);
+					_process_packet_view (thread_data, &view);
+				} else {
+					thread_data->n_packet_socket_malformed_packets++;
+				}
 
-				_check_frame_completion (thread_data, time_us, frame);
-
-				header = (void *) (((char *) header) + header->tp_next_offset);
+				if (i + 1 < descriptor->h1.num_pkts) {
+					if (header->tp_next_offset == 0 ||
+					    header->tp_next_offset > (gsize) (block_end - (const guint8 *) header)) {
+						thread_data->n_packet_socket_malformed_packets +=
+							descriptor->h1.num_pkts - i - 1;
+						break;
+					}
+					header = (const struct tpacket3_hdr *)
+						((const guint8 *) header + header->tp_next_offset);
+				}
 			}
 
-			descriptor->h1.block_status = TP_STATUS_KERNEL;
+		release_block:
+			__atomic_store_n (&descriptor->h1.block_status, TP_STATUS_KERNEL, __ATOMIC_RELEASE);
 			block_id = (block_id + 1) % req.tp_block_nr;
+			thread_data->n_packet_socket_blocks++;
+			if (++blocks_since_stats == ARV_GV_STREAM_PACKET_SOCKET_STATS_BLOCK_INTERVAL) {
+				_packet_socket_update_statistics (thread_data, fd);
+				blocks_since_stats = 0;
+			}
 		}
 	} while (!g_cancellable_is_cancelled (thread_data->cancellable));
 
+	_packet_socket_update_statistics (thread_data, fd);
+	result = TRUE;
+
+	out:
 	if (use_poll)
 		g_cancellable_release_fd (thread_data->cancellable);
+	if (buffer != MAP_FAILED)
+		munmap (buffer, (gsize) req.tp_block_size * req.tp_block_nr);
+	if (fd >= 0)
+		close (fd);
 
-bind_error:
-	munmap (buffer, req.tp_block_size * req.tp_block_nr);
-socket_option_error:
-map_error:
-	close (fd);
-af_packet_error:
-        g_mutex_lock (&thread_data->thread_started_mutex);
-        thread_data->thread_started = TRUE;
-        g_cond_signal (&thread_data->thread_started_cond);
-        g_mutex_unlock (&thread_data->thread_started_mutex);
+	return result;
 }
 
 #endif /* ARAVIS_HAS_PACKET_SOCKET */
@@ -1434,6 +1608,8 @@ arv_gv_stream_thread (void *data)
 	thread_data->frames = NULL;
 	thread_data->last_frame_id = 0;
 	thread_data->first_packet = TRUE;
+	thread_data->packet_socket_active = 0;
+	thread_data->packet_socket_ring_size = 0;
 
 	if (thread_data->callback != NULL)
 		thread_data->callback (thread_data->callback_data, ARV_STREAM_CALLBACK_TYPE_INIT, NULL);
@@ -1441,7 +1617,10 @@ arv_gv_stream_thread (void *data)
 #if ARAVIS_HAS_PACKET_SOCKET
 	if (thread_data->use_packet_socket && (fd = socket (PF_PACKET, SOCK_RAW, g_htons (ETH_P_ALL))) >= 0) {
 		close (fd);
-		_ring_buffer_loop (thread_data);
+		if (!_ring_buffer_loop (thread_data)) {
+			arv_warning_stream_thread ("[GvStream::loop] Falling back to the standard socket method");
+			_loop (thread_data);
+		}
 	} else
 #endif
 		_loop (thread_data);
@@ -1649,6 +1828,15 @@ arv_gv_stream_set_property (GObject * object, guint prop_id,
 		case ARV_GV_STREAM_PROPERTY_FRAME_RETENTION:
 			thread_data->frame_retention_us = g_value_get_uint (value);
 			break;
+		case ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_SIZE:
+			thread_data->packet_socket_block_size = g_value_get_uint (value);
+			break;
+		case ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_COUNT:
+			thread_data->packet_socket_block_count = g_value_get_uint (value);
+			break;
+		case ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_TIMEOUT:
+			thread_data->packet_socket_block_timeout_ms = g_value_get_uint (value);
+			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 			break;
@@ -1685,6 +1873,15 @@ arv_gv_stream_get_property (GObject * object, guint prop_id,
 			break;
 		case ARV_GV_STREAM_PROPERTY_FRAME_RETENTION:
 			g_value_set_uint (value, thread_data->frame_retention_us);
+			break;
+		case ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_SIZE:
+			g_value_set_uint (value, thread_data->packet_socket_block_size);
+			break;
+		case ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_COUNT:
+			g_value_set_uint (value, thread_data->packet_socket_block_count);
+			break;
+		case ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_TIMEOUT:
+			g_value_set_uint (value, thread_data->packet_socket_block_timeout_ms);
 			break;
 		default:
 			G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1833,6 +2030,24 @@ arv_gv_stream_constructed (GObject *object)
                                  G_TYPE_UINT64, &priv->thread_data->n_transferred_bytes);
         arv_stream_declare_info (ARV_STREAM (gv_stream), "n_ignored_bytes",
                                  G_TYPE_UINT64, &priv->thread_data->n_ignored_bytes);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "packet_socket_active",
+				 G_TYPE_UINT64, &priv->thread_data->packet_socket_active);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "packet_socket_ring_size",
+				 G_TYPE_UINT64, &priv->thread_data->packet_socket_ring_size);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_blocks",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_blocks);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_polls",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_polls);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_poll_timeouts",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_poll_timeouts);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_packets",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_packets);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_drops",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_drops);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_freezes",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_freezes);
+	arv_stream_declare_info (ARV_STREAM (gv_stream), "n_packet_socket_malformed_packets",
+				 G_TYPE_UINT64, &priv->thread_data->n_packet_socket_malformed_packets);
 }
 
 static void
@@ -1904,6 +2119,24 @@ arv_gv_stream_finalize (GObject *object)
 				  thread_data->n_transferred_bytes);
 		arv_info_stream ("[GvStream::finalize] n_ignored_bytes        = %" G_GUINT64_FORMAT,
 				  thread_data->n_ignored_bytes);
+		arv_info_stream ("[GvStream::finalize] packet_socket_active   = %" G_GUINT64_FORMAT,
+				  thread_data->packet_socket_active);
+		arv_info_stream ("[GvStream::finalize] packet_socket_ring_size = %" G_GUINT64_FORMAT,
+				  thread_data->packet_socket_ring_size);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_blocks = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_blocks);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_polls  = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_polls);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_poll_timeouts = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_poll_timeouts);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_packets = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_packets);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_drops  = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_drops);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_freezes = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_freezes);
+		arv_info_stream ("[GvStream::finalize] n_packet_socket_malformed_packets = %" G_GUINT64_FORMAT,
+				  thread_data->n_packet_socket_malformed_packets);
 
 		g_clear_object (&thread_data->device_address);
 		g_clear_object (&thread_data->interface_address);
@@ -2033,4 +2266,59 @@ arv_gv_stream_class_init (ArvGvStreamClass *gv_stream_class)
 				   ARV_GV_STREAM_FRAME_RETENTION_US_DEFAULT,
 				   G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
 		);
+
+	/**
+	 * ArvGvStream:packet-socket-block-size:
+	 *
+	 * Size of each Linux `TPACKET_V3` receive-ring block, in bytes. The value
+	 * must be a multiple of both the system page size and the packet-socket
+	 * frame size. It is applied when acquisition starts.
+	 *
+	 * Since: 0.10.0
+	 */
+	g_object_class_install_property (
+		object_class, ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_SIZE,
+		g_param_spec_uint ("packet-socket-block-size", "Packet socket block size",
+				   "TPACKET_V3 block size, in bytes",
+				   4096, G_MAXUINT,
+				   ARV_GV_STREAM_PACKET_SOCKET_BLOCK_SIZE_DEFAULT,
+				   G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
+		);
+
+	/**
+	 * ArvGvStream:packet-socket-block-count:
+	 *
+	 * Number of blocks in the Linux `TPACKET_V3` receive ring. It is applied
+	 * when acquisition starts.
+	 *
+	 * Since: 0.10.0
+	 */
+	g_object_class_install_property (
+		object_class, ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_COUNT,
+		g_param_spec_uint ("packet-socket-block-count", "Packet socket block count",
+				   "Number of TPACKET_V3 receive-ring blocks",
+				   1, G_MAXUINT,
+				   ARV_GV_STREAM_PACKET_SOCKET_BLOCK_COUNT_DEFAULT,
+				   G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
+		);
+
+	/**
+	 * ArvGvStream:packet-socket-block-timeout:
+	 *
+	 * Maximum time the kernel may retain a partially filled Linux
+	 * `TPACKET_V3` block, in milliseconds. It is applied when acquisition
+	 * starts. Lower values may reduce sparse-stream and frame-tail latency at
+	 * the cost of more frequent block handoffs.
+	 *
+	 * Since: 0.10.0
+	 */
+	g_object_class_install_property (
+		object_class, ARV_GV_STREAM_PROPERTY_PACKET_SOCKET_BLOCK_TIMEOUT,
+		g_param_spec_uint ("packet-socket-block-timeout", "Packet socket block timeout",
+				   "TPACKET_V3 block retirement timeout, in milliseconds",
+				   0, G_MAXUINT,
+				   ARV_GV_STREAM_PACKET_SOCKET_BLOCK_TIMEOUT_DEFAULT_MS,
+				   G_PARAM_CONSTRUCT | G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS)
+		);
+
 }

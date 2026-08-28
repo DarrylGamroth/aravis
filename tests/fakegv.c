@@ -207,6 +207,45 @@ stream_test (void)
 	g_usleep (2000000);
 }
 
+static void
+packet_socket_properties_test (void)
+{
+	ArvStream *stream;
+	GError *error = NULL;
+	guint block_size;
+	guint block_count;
+	guint block_timeout;
+
+	stream = arv_camera_create_stream (camera, NULL, NULL, NULL, &error);
+	g_assert_no_error (error);
+	g_assert_true (ARV_IS_GV_STREAM (stream));
+
+	g_object_get (stream,
+		      "packet-socket-block-size", &block_size,
+		      "packet-socket-block-count", &block_count,
+		      "packet-socket-block-timeout", &block_timeout,
+		      NULL);
+	g_assert_cmpuint (block_size, ==, 1U << 21);
+	g_assert_cmpuint (block_count, ==, 16);
+	g_assert_cmpuint (block_timeout, ==, 5);
+
+	g_object_set (stream,
+		      "packet-socket-block-size", 4U << 20,
+		      "packet-socket-block-count", 8U,
+		      "packet-socket-block-timeout", 1U,
+		      NULL);
+	g_object_get (stream,
+		      "packet-socket-block-size", &block_size,
+		      "packet-socket-block-count", &block_count,
+		      "packet-socket-block-timeout", &block_timeout,
+		      NULL);
+	g_assert_cmpuint (block_size, ==, 4U << 20);
+	g_assert_cmpuint (block_count, ==, 8);
+	g_assert_cmpuint (block_timeout, ==, 1);
+
+	g_object_unref (stream);
+}
+
 typedef struct {
 	ArvGvStream *stream;
 	gint start_count;
@@ -366,6 +405,8 @@ main (int argc, char *argv[])
 
 	g_test_init (&argc, &argv, NULL);
 
+	/* Keep this test isolated from installed GenTL producers and physical NICs. */
+	arv_select_interface ("GigEVision");
 	arv_set_fake_camera_genicam_filename (GENICAM_FILENAME);
 	arv_gv_interface_set_discovery_interface_name ("lo");
 
@@ -381,6 +422,7 @@ main (int argc, char *argv[])
 	g_test_add_func ("/fakegv/device_registers", register_test);
 	g_test_add_func ("/fakegv/acquisition", acquisition_test);
 	g_test_add_func ("/fakegv/stream", stream_test);
+	g_test_add_func ("/fakegv/packet_socket_properties", packet_socket_properties_test);
 	g_test_add_func ("/fakegv/progressive_stream", progressive_stream_test);
 	g_test_add_func ("/fakegv/dynamic_roi", dynamic_roi_test);
 
@@ -394,4 +436,3 @@ main (int argc, char *argv[])
 
 	return result;
 }
-

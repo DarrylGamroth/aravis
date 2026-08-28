@@ -102,6 +102,36 @@ example, the following command gives this capability to the Aravis viewer:
 sudo setcap cap_net_raw+ep arv-viewer
 ```
 
+The Linux packet-socket receiver uses a `TPACKET_V3` memory-mapped ring. Its
+capacity and block-retirement latency can be configured before acquisition:
+
+```c
+g_object_set (stream,
+              "packet-socket-block-size", 4U << 20,
+              "packet-socket-block-count", 8U,
+              "packet-socket-block-timeout", 1U,
+              NULL);
+```
+
+The block size must be a multiple of both the system page size and 1024 bytes.
+If the packet socket or requested ring cannot be created, Aravis logs the
+reason and falls back to its standard UDP receiver.
+
+Packet-socket operation can be checked using the stream information fields
+`packet_socket_active`, `packet_socket_ring_size`,
+`n_packet_socket_blocks`, `n_packet_socket_polls`,
+`n_packet_socket_poll_timeouts`, `n_packet_socket_packets`,
+`n_packet_socket_drops`, `n_packet_socket_freezes`, and
+`n_packet_socket_malformed_packets`. In particular, drops and freezes should
+be recorded alongside application-level missing-packet and failed-buffer
+statistics when tuning a stream.
+
+File capabilities put the dynamic loader into secure-execution mode. A
+capability-tagged development executable whose libraries are reached through a
+build-tree `$ORIGIN` runpath may therefore fail to load. Use an installed
+executable with trusted libraries, or test the build in an isolated user and
+network namespace.
+
 # Legacy endianess mechanism
 
 Some GigEVision devices incorrectly report a Genicam schema version greater or
