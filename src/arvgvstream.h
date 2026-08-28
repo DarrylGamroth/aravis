@@ -67,25 +67,7 @@ typedef enum {
 	ARV_GV_STREAM_PACKET_RESEND_ALWAYS
 } ArvGvStreamPacketResend;
 
-/**
- * ArvGvStreamBufferProgress:
- * @frame_id: identifier of the frame currently using the buffer
- * @committed_size: size of the contiguous payload prefix already copied to the buffer
- * @active: whether the buffer is currently being filled
- * @supported: whether progressive access is supported for this payload
- *
- * A snapshot of native GigE Vision receive progress. Bytes below
- * @committed_size are no longer written by the stream for the current frame.
- * Progressive access is currently supported only for ordinary image payloads.
- *
- * Since: 0.10.0
- */
-typedef struct {
-	guint64 frame_id;
-	size_t committed_size;
-	gboolean active;
-	gboolean supported;
-} ArvGvStreamBufferProgress;
+typedef ArvStreamBufferProgress ArvGvStreamBufferProgress;
 
 #define ARV_TYPE_GV_STREAM             (arv_gv_stream_get_type ())
 ARV_API G_DECLARE_FINAL_TYPE (ArvGvStream, arv_gv_stream, ARV, GV_STREAM, ArvStream)

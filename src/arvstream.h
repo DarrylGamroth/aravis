@@ -91,6 +91,27 @@ struct _ArvStreamClass {
 
 typedef void (*ArvStreamCallback)	(void *user_data, ArvStreamCallbackType type, ArvBuffer *buffer);
 
+/**
+ * ArvStreamBufferProgress:
+ * @frame_id: identifier of the frame currently using the buffer
+ * @committed_size: size of the contiguous payload prefix available to readers
+ * @active: whether the buffer is currently being filled
+ * @supported: whether progressive access is supported for this payload
+ *
+ * A snapshot of stream receive progress. Bytes below @committed_size are no
+ * longer written by the stream for the current frame. Progressive access is
+ * currently supported only for ordinary image payloads on native GigE Vision
+ * and USB3 Vision streams.
+ *
+ * Since: 0.10.0
+ */
+typedef struct {
+	guint64 frame_id;
+	size_t committed_size;
+	gboolean active;
+	gboolean supported;
+} ArvStreamBufferProgress;
+
 ARV_API void		arv_stream_push_buffer			(ArvStream *stream, ArvBuffer *buffer);
 ARV_API ArvBuffer *	arv_stream_pop_buffer			(ArvStream *stream);
 ARV_API ArvBuffer *	arv_stream_try_pop_buffer		(ArvStream *stream);
@@ -105,6 +126,9 @@ ARV_API guint           arv_stream_delete_buffers               (ArvStream *stre
 ARV_API gboolean        arv_stream_create_buffers               (ArvStream *stream, guint n_buffers,
                                                                  void *user_data, GDestroyNotify user_data_destroy_func,
                                                                  GError **error);
+ARV_API gboolean	arv_stream_get_buffer_progress		(ArvStream *stream,
+							 ArvBuffer *buffer,
+							 ArvStreamBufferProgress *progress);
 
 ARV_API void		arv_stream_get_statistics		(ArvStream *stream,
 								 guint64 *n_completed_buffers,

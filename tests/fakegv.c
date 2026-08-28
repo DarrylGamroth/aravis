@@ -247,7 +247,7 @@ packet_socket_properties_test (void)
 }
 
 typedef struct {
-	ArvGvStream *stream;
+	ArvStream *stream;
 	gint start_count;
 	gint callback_error;
 } ProgressCallbackData;
@@ -256,12 +256,12 @@ static void
 progress_stream_cb (void *user_data, ArvStreamCallbackType type, ArvBuffer *buffer)
 {
 	ProgressCallbackData *data = user_data;
-	ArvGvStreamBufferProgress progress;
+	ArvStreamBufferProgress progress;
 
 	if (type != ARV_STREAM_CALLBACK_TYPE_START_BUFFER)
 		return;
 	if (buffer == NULL || data->stream == NULL ||
-	    !arv_gv_stream_get_buffer_progress (data->stream, buffer, &progress) ||
+	    !arv_stream_get_buffer_progress (data->stream, buffer, &progress) ||
 	    !progress.active)
 		g_atomic_int_set (&data->callback_error, TRUE);
 	g_atomic_int_inc (&data->start_count);
@@ -273,7 +273,10 @@ progressive_stream_test (void)
 	ProgressCallbackData callback_data = {
 		0,
 	};
-	ArvGvStreamBufferProgress progress = {
+	ArvStreamBufferProgress progress = {
+		0,
+	};
+	ArvGvStreamBufferProgress gv_progress = {
 		0,
 	};
 	ArvBuffer *buffers[3];
@@ -292,7 +295,7 @@ progressive_stream_test (void)
 					   &callback_data, NULL, &error);
 	g_assert_no_error (error);
 	g_assert_true (ARV_IS_GV_STREAM (stream));
-	callback_data.stream = ARV_GV_STREAM (stream);
+	callback_data.stream = stream;
 
 	payload = arv_camera_get_payload (camera, &error);
 	g_assert_no_error (error);
@@ -306,8 +309,7 @@ progressive_stream_test (void)
 	deadline = g_get_monotonic_time () + 2 * G_TIME_SPAN_SECOND;
 	while (!observed_partial && g_get_monotonic_time () < deadline) {
 		for (i = 0; i < G_N_ELEMENTS (buffers); i++) {
-			if (arv_gv_stream_get_buffer_progress (ARV_GV_STREAM (stream),
-							       buffers[i], &progress) &&
+			if (arv_stream_get_buffer_progress (stream, buffers[i], &progress) &&
 			    progress.active &&
 			    progress.supported && progress.committed_size > 0 &&
 			    progress.committed_size < payload) {
@@ -323,11 +325,16 @@ progressive_stream_test (void)
 
 	completed = arv_stream_timeout_pop_buffer (stream, 2 * G_TIME_SPAN_SECOND);
 	g_assert_nonnull (completed);
-	g_assert_true (arv_gv_stream_get_buffer_progress (ARV_GV_STREAM (stream),
-							  completed, &progress));
+	g_assert_true (arv_stream_get_buffer_progress (stream, completed, &progress));
 	g_assert_false (progress.active);
 	g_assert_true (progress.supported);
 	g_assert_cmpuint (progress.committed_size, ==, payload);
+	g_assert_true (arv_gv_stream_get_buffer_progress (ARV_GV_STREAM (stream),
+							  completed, &gv_progress));
+	g_assert_cmpuint (gv_progress.frame_id, ==, progress.frame_id);
+	g_assert_cmpuint (gv_progress.committed_size, ==, progress.committed_size);
+	g_assert_cmpint (gv_progress.active, ==, progress.active);
+	g_assert_cmpint (gv_progress.supported, ==, progress.supported);
 	g_assert_cmpint (g_atomic_int_get (&callback_data.start_count), >, 0);
 	g_assert_cmpint (g_atomic_int_get (&callback_data.callback_error), ==, 0);
 

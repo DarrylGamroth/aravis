@@ -31,7 +31,7 @@
  */
 
 #include <arvstreamprivate.h>
-#include <arvbuffer.h>
+#include <arvbufferprivate.h>
 #include <arvdevice.h>
 #include <arvdebugprivate.h>
 #include <gio/gio.h>
@@ -81,6 +81,100 @@ static void arv_stream_initable_iface_init (GInitableIface *iface);
 G_DEFINE_ABSTRACT_TYPE_WITH_CODE (ArvStream, arv_stream, G_TYPE_OBJECT,
 				  G_ADD_PRIVATE (ArvStream)
 				  G_IMPLEMENT_INTERFACE (G_TYPE_INITABLE, arv_stream_initable_iface_init))
+
+void
+arv_stream_buffer_progress_begin (ArvBuffer *buffer, guint64 frame_id)
+{
+	g_atomic_int_set (&buffer->priv->stream_progress_active, FALSE);
+	g_atomic_int_inc (&buffer->priv->stream_progress_generation);
+	g_atomic_int_set (&buffer->priv->stream_progress_frame_id_low, (gint) (guint32) frame_id);
+	g_atomic_int_set (&buffer->priv->stream_progress_frame_id_high, (gint) (guint32) (frame_id >> 32));
+	g_atomic_pointer_set (&buffer->priv->stream_progress_committed_size, GSIZE_TO_POINTER (0));
+	g_atomic_int_set (&buffer->priv->stream_progress_supported, FALSE);
+	g_atomic_int_set (&buffer->priv->stream_progress_active, TRUE);
+}
+
+void
+arv_stream_buffer_progress_set_supported (ArvBuffer *buffer, gboolean supported)
+{
+	g_atomic_int_set (&buffer->priv->stream_progress_supported, supported);
+}
+
+void
+arv_stream_buffer_progress_publish (ArvBuffer *buffer, gsize committed_size)
+{
+	g_return_if_fail (committed_size <= buffer->priv->allocated_size);
+
+	if (g_atomic_int_get (&buffer->priv->stream_progress_supported))
+		g_atomic_pointer_set (&buffer->priv->stream_progress_committed_size,
+				      GSIZE_TO_POINTER (committed_size));
+}
+
+void
+arv_stream_buffer_progress_end (ArvBuffer *buffer)
+{
+	g_atomic_int_set (&buffer->priv->stream_progress_active, FALSE);
+}
+
+/**
+ * arv_stream_get_buffer_progress:
+ * @stream: an #ArvStream
+ * @buffer: an #ArvBuffer announced to @stream
+ * @progress: (out): receive progress snapshot
+ *
+ * Reads a coherent snapshot of the receive progress for @buffer. A successful
+ * snapshot does not imply that a frame is active or that its payload supports
+ * progressive access; inspect @progress.active and @progress.supported.
+ *
+ * @progress.committed_size is a contiguous prefix. A stream publishes it only
+ * after the corresponding payload writes have completed.
+ *
+ * Returns: %TRUE if a coherent snapshot was obtained
+ *
+ * Since: 0.10.0
+ */
+gboolean
+arv_stream_get_buffer_progress (ArvStream *stream,
+				ArvBuffer *buffer,
+				ArvStreamBufferProgress *progress)
+{
+	guint attempt;
+
+	g_return_val_if_fail (ARV_IS_STREAM (stream), FALSE);
+	g_return_val_if_fail (ARV_IS_BUFFER (buffer), FALSE);
+	g_return_val_if_fail (progress != NULL, FALSE);
+
+	for (attempt = 0; attempt < 3; attempt++) {
+		gint generation_before;
+		gint generation_after;
+		gint active_before;
+		gint active_after;
+		guint32 frame_id_low;
+		guint32 frame_id_high;
+		gsize committed_size;
+		gboolean supported;
+
+		generation_before = g_atomic_int_get (&buffer->priv->stream_progress_generation);
+		active_before = g_atomic_int_get (&buffer->priv->stream_progress_active);
+		supported = g_atomic_int_get (&buffer->priv->stream_progress_supported);
+		frame_id_low = (guint32) g_atomic_int_get (&buffer->priv->stream_progress_frame_id_low);
+		frame_id_high = (guint32) g_atomic_int_get (&buffer->priv->stream_progress_frame_id_high);
+		committed_size = GPOINTER_TO_SIZE (
+			g_atomic_pointer_get (&buffer->priv->stream_progress_committed_size));
+		active_after = g_atomic_int_get (&buffer->priv->stream_progress_active);
+		generation_after = g_atomic_int_get (&buffer->priv->stream_progress_generation);
+
+		if (generation_before == generation_after && active_before == active_after) {
+			progress->frame_id = ((guint64) frame_id_high << 32) | frame_id_low;
+			progress->committed_size = committed_size;
+			progress->active = active_after;
+			progress->supported = supported;
+			return TRUE;
+		}
+	}
+
+	return FALSE;
+}
 
 /**
  * arv_stream_push_buffer:
@@ -982,4 +1076,3 @@ arv_stream_initable_iface_init (GInitableIface *iface)
 {
 	iface->init = arv_stream_initable_init;
 }
-

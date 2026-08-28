@@ -111,7 +111,14 @@ struct _ArvUvStreamClass {
 	ArvStreamClass parent_class;
 };
 
+typedef struct _ArvUvStreamBufferContext ArvUvStreamBufferContext;
+
 typedef struct {
+	ArvUvStreamBufferContext *buffer_context;
+	guint index;
+} ArvUvStreamPayloadContext;
+
+struct _ArvUvStreamBufferContext {
 	ArvBuffer *buffer;
 	ArvStream *stream;
 
@@ -122,6 +129,7 @@ typedef struct {
 	GCond* transfer_completed_event;
 
 	size_t total_payload_transferred;
+	size_t committed_size;
         size_t expected_size;
 
         guint64 maximum_submit_total;
@@ -130,6 +138,10 @@ typedef struct {
 
 	int num_payload_transfers;
 	struct libusb_transfer *leader_transfer, *trailer_transfer, **payload_transfers;
+	ArvUvStreamPayloadContext *payload_contexts;
+	/* The device event thread is the sole writer of completion state. */
+	gboolean *payload_completed;
+	guint next_payload_to_publish;
 
 	guint num_submitted;
 
@@ -140,7 +152,7 @@ typedef struct {
 	ArvStreamStatistics *statistics;
 
         gint *n_buffer_in_use;
-} ArvUvStreamBufferContext;
+};
 
 G_DEFINE_TYPE_WITH_CODE (ArvUvStream, arv_uv_stream, ARV_TYPE_STREAM, G_ADD_PRIVATE (ArvUvStream))
 
@@ -211,6 +223,15 @@ void LIBUSB_CALL arv_uv_stream_leader_cb (struct libusb_transfer *transfer)
                                 }
                                 ctx->buffer->priv->frame_id = arv_uvsp_packet_get_frame_id (packet);
                                 ctx->buffer->priv->timestamp_ns = arv_uvsp_packet_get_timestamp (packet);
+				arv_stream_buffer_progress_begin (ctx->buffer, ctx->buffer->priv->frame_id);
+				arv_stream_buffer_progress_set_supported (
+					ctx->buffer,
+					ctx->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE);
+				arv_stream_buffer_progress_publish (ctx->buffer, ctx->committed_size);
+				if (ctx->callback != NULL)
+					ctx->callback (ctx->callback_data,
+						       ARV_STREAM_CALLBACK_TYPE_START_BUFFER,
+						       ctx->buffer);
                                 break;
                         default:
                                 arv_warning_stream_thread ("Leader transfer failed (%s)",
@@ -285,7 +306,9 @@ _gendc_payload (ArvUvStreamBufferContext *ctx)
 static void LIBUSB_CALL
 arv_uv_stream_payload_cb (struct libusb_transfer *transfer)
 {
-	ArvUvStreamBufferContext *ctx = transfer->user_data;
+	ArvUvStreamPayloadContext *payload_context = transfer->user_data;
+	ArvUvStreamBufferContext *ctx = payload_context->buffer_context;
+	guint index = payload_context->index;
 
         if (ctx->buffer != NULL) {
                 if (ctx->is_aborting) {
@@ -293,6 +316,28 @@ arv_uv_stream_payload_cb (struct libusb_transfer *transfer)
                 } else {
                         if (transfer->status == LIBUSB_TRANSFER_COMPLETED) {
                                 ctx->total_payload_transferred += transfer->actual_length;
+				if (transfer->actual_length != transfer->length ||
+				    index >= (guint) ctx->num_payload_transfers ||
+				    ctx->payload_transfers[index] != transfer ||
+				    transfer->buffer < ctx->buffer->priv->data ||
+				    (gsize) (transfer->buffer - ctx->buffer->priv->data) >=
+					    ctx->buffer->priv->allocated_size) {
+					ctx->buffer->priv->status = ARV_BUFFER_STATUS_SIZE_MISMATCH;
+				} else {
+					ctx->payload_completed[index] = TRUE;
+					while (ctx->next_payload_to_publish <
+					       (guint) ctx->num_payload_transfers &&
+					       ctx->payload_completed[ctx->next_payload_to_publish]) {
+						struct libusb_transfer *completed;
+
+						completed = ctx->payload_transfers[ctx->next_payload_to_publish];
+						ctx->committed_size =
+							(completed->buffer - ctx->buffer->priv->data) +
+							completed->actual_length;
+						ctx->next_payload_to_publish++;
+					}
+					arv_stream_buffer_progress_publish (ctx->buffer, ctx->committed_size);
+				}
                                 if (ctx->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_GENDC_CONTAINER){
                                         _gendc_payload(ctx);
                                 }
@@ -361,6 +406,7 @@ void LIBUSB_CALL arv_uv_stream_trailer_cb (struct libusb_transfer *transfer)
                         }
                 }
 
+		arv_stream_buffer_progress_end (ctx->buffer);
                 arv_stream_push_output_buffer (ctx->stream, ctx->buffer);
                 if (ctx->callback != NULL)
                         ctx->callback (ctx->callback_data,
@@ -379,7 +425,7 @@ void LIBUSB_CALL arv_uv_stream_trailer_cb (struct libusb_transfer *transfer)
 static ArvUvStreamBufferContext*
 arv_uv_stream_buffer_context_new (ArvBuffer *buffer, ArvUvStreamThreadData *thread_data, gint *total_submitted_bytes)
 {
-	ArvUvStreamBufferContext* ctx = g_malloc0 (sizeof(ArvUvStreamBufferContext));
+	ArvUvStreamBufferContext* ctx;
 	int i;
 	size_t offset = 0;
 
@@ -404,16 +450,20 @@ arv_uv_stream_buffer_context_new (ArvBuffer *buffer, ArvUvStreamThreadData *thre
 
 	ctx->num_payload_transfers = (buffer->priv->allocated_size - 1) / thread_data->payload_size + 1;
 	ctx->payload_transfers = g_malloc (ctx->num_payload_transfers * sizeof(struct libusb_transfer*));
+	ctx->payload_contexts = g_new0 (ArvUvStreamPayloadContext, ctx->num_payload_transfers);
+	ctx->payload_completed = g_new0 (gboolean, ctx->num_payload_transfers);
 
 	for (i = 0; i < ctx->num_payload_transfers; ++i) {
 		size_t size = MIN (thread_data->payload_size, buffer->priv->allocated_size - offset);
 
 		ctx->payload_transfers[i] = libusb_alloc_transfer(0);
+		ctx->payload_contexts[i].buffer_context = ctx;
+		ctx->payload_contexts[i].index = i;
 
 		arv_uv_device_fill_bulk_transfer (ctx->payload_transfers[i], thread_data->uv_device,
 			ARV_UV_ENDPOINT_DATA, LIBUSB_ENDPOINT_IN,
 			buffer->priv->data + offset, size,
-			arv_uv_stream_payload_cb, ctx,
+			arv_uv_stream_payload_cb, &ctx->payload_contexts[i],
 			0);
 
 		offset += size;
@@ -450,10 +500,13 @@ arv_uv_stream_buffer_context_free (gpointer data)
 
 	g_free (ctx->leader_buffer);
         g_free (ctx->payload_transfers);
+	g_free (ctx->payload_contexts);
+	g_free (ctx->payload_completed);
 	g_free (ctx->trailer_buffer);
 
         if (ctx->buffer != NULL) {
                 ctx->buffer->priv->status = ARV_BUFFER_STATUS_ABORTED;
+		arv_stream_buffer_progress_end (ctx->buffer);
                 arv_stream_push_output_buffer (ctx->stream, ctx->buffer);
                 if (ctx->callback != NULL)
                         ctx->callback (ctx->callback_data,
@@ -508,13 +561,12 @@ arv_uv_stream_buffer_context_submit (ArvUvStreamBufferContext* ctx, ArvBuffer *b
 {
 	int i;
 
-        if (ctx->callback != NULL)
-                ctx->callback (ctx->callback_data,
-                               ARV_STREAM_CALLBACK_TYPE_START_BUFFER,
-                               buffer);
-
         ctx->buffer = buffer;
         ctx->total_payload_transferred = 0;
+	ctx->committed_size = 0;
+	ctx->next_payload_to_publish = 0;
+	memset (ctx->payload_completed, 0,
+		(gsize) ctx->num_payload_transfers * sizeof (*ctx->payload_completed));
         buffer->priv->status = ARV_BUFFER_STATUS_FILLING;
 
         ctx->expected_size = thread_data->expected_size;
@@ -726,6 +778,7 @@ arv_uv_stream_thread_sync (void *data)
 					if (buffer != NULL) {
 						arv_info_stream_thread ("New leader received while a buffer is still open");
 						buffer->priv->status = ARV_BUFFER_STATUS_MISSING_PACKETS;
+						arv_stream_buffer_progress_end (buffer);
 						arv_stream_push_output_buffer (thread_data->stream, buffer);
 						if (thread_data->callback != NULL)
 							thread_data->callback (thread_data->callback_data,
@@ -765,10 +818,14 @@ arv_uv_stream_thread_sync (void *data)
 						buffer->priv->frame_id = arv_uvsp_packet_get_frame_id (packet);
 						buffer->priv->timestamp_ns = arv_uvsp_packet_get_timestamp (packet);
 						offset = 0;
+						arv_stream_buffer_progress_begin (buffer, buffer->priv->frame_id);
+						arv_stream_buffer_progress_set_supported (
+							buffer,
+							buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE);
 						if (thread_data->callback != NULL)
 							thread_data->callback (thread_data->callback_data,
-									       ARV_STREAM_CALLBACK_TYPE_START_BUFFER,
-									       NULL);
+								       ARV_STREAM_CALLBACK_TYPE_START_BUFFER,
+								       buffer);
                                                 thread_data->statistics.n_transferred_bytes += transferred;
                                         } else {
                                                 thread_data->statistics.n_underruns++;
@@ -787,6 +844,7 @@ arv_uv_stream_thread_sync (void *data)
                                                                                 offset, thread_data->expected_size);
 
                                                        buffer->priv->status = ARV_BUFFER_STATUS_SIZE_MISMATCH;
+						       arv_stream_buffer_progress_end (buffer);
                                                        arv_stream_push_output_buffer (thread_data->stream, buffer);
                                                        if (thread_data->callback != NULL)
                                                                thread_data->callback (thread_data->callback_data,
@@ -800,6 +858,7 @@ arv_uv_stream_thread_sync (void *data)
                                                         buffer->priv->status = ARV_BUFFER_STATUS_SUCCESS;
                                                         buffer->priv->received_size = offset;
                                                         buffer->priv->parts[0].size = offset;
+							arv_stream_buffer_progress_end (buffer);
                                                         arv_stream_push_output_buffer (thread_data->stream, buffer);
                                                         if (thread_data->callback != NULL)
                                                                 thread_data->callback (thread_data->callback_data,
@@ -819,6 +878,7 @@ arv_uv_stream_thread_sync (void *data)
                                                                 memcpy (((char *) buffer->priv->data) + offset,
                                                                         packet, transferred);
                                                         offset += transferred;
+							arv_stream_buffer_progress_publish (buffer, offset);
                                                         thread_data->statistics.n_transferred_bytes += transferred;
 
                                                         if (buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_GENDC_CONTAINER){
@@ -842,6 +902,7 @@ arv_uv_stream_thread_sync (void *data)
         if (buffer != NULL) {
 		buffer->priv->status = ARV_BUFFER_STATUS_ABORTED;
                 thread_data->statistics.n_aborted++;
+		arv_stream_buffer_progress_end (buffer);
 		arv_stream_push_output_buffer (thread_data->stream, buffer);
 		if (thread_data->callback != NULL)
 			thread_data->callback (thread_data->callback_data,

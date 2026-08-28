@@ -38,6 +38,11 @@ void		arv_stream_take_init_error		(ArvStream *device, GError *error);
 
 void            arv_stream_declare_info                 (ArvStream *stream, const char *name, GType type, gpointer data);
 
+void		arv_stream_buffer_progress_begin	(ArvBuffer *buffer, guint64 frame_id);
+void		arv_stream_buffer_progress_set_supported (ArvBuffer *buffer, gboolean supported);
+void		arv_stream_buffer_progress_publish	(ArvBuffer *buffer, gsize committed_size);
+void		arv_stream_buffer_progress_end		(ArvBuffer *buffer);
+
 G_END_DECLS
 
 #endif

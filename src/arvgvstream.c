@@ -136,28 +136,9 @@ typedef struct {
 } ArvGvStreamFrameData;
 
 static void
-_buffer_progress_begin (ArvBuffer *buffer, guint64 frame_id)
-{
-	g_atomic_int_set (&buffer->priv->gv_progress_active, FALSE);
-	g_atomic_int_inc (&buffer->priv->gv_progress_generation);
-	g_atomic_int_set (&buffer->priv->gv_progress_frame_id_low, (gint) (guint32) frame_id);
-	g_atomic_int_set (&buffer->priv->gv_progress_frame_id_high, (gint) (guint32) (frame_id >> 32));
-	g_atomic_pointer_set (&buffer->priv->gv_progress_committed_size, GSIZE_TO_POINTER (0));
-	g_atomic_int_set (&buffer->priv->gv_progress_supported, FALSE);
-	g_atomic_int_set (&buffer->priv->gv_progress_active, TRUE);
-}
-static void
-_buffer_progress_end (ArvBuffer *buffer)
-{
-	g_atomic_int_set (&buffer->priv->gv_progress_active, FALSE);
-}
-
-static void
 _buffer_progress_publish (ArvGvStreamFrameData *frame)
 {
-	if (g_atomic_int_get (&frame->buffer->priv->gv_progress_supported))
-		g_atomic_pointer_set (&frame->buffer->priv->gv_progress_committed_size,
-				      GSIZE_TO_POINTER (frame->committed_size));
+	arv_stream_buffer_progress_publish (frame->buffer, frame->committed_size);
 }
 
 struct _ArvGvStreamThreadData {
@@ -450,7 +431,7 @@ _find_frame_data (ArvGvStreamThreadData *thread_data,
 	frame->buffer = buffer;
 	_update_socket (thread_data, frame->buffer);
 	frame->buffer->priv->status = ARV_BUFFER_STATUS_FILLING;
-	_buffer_progress_begin (frame->buffer, frame_id);
+	arv_stream_buffer_progress_begin (frame->buffer, frame_id);
 
 	frame->first_packet_time_us = time_us;
 	frame->last_packet_time_us = time_us;
@@ -507,8 +488,9 @@ _process_data_leader (ArvGvStreamThreadData *thread_data,
 	frame->buffer->priv->chunk_endianness = G_BIG_ENDIAN;
 
 	frame->buffer->priv->system_timestamp_ns = g_get_real_time() * 1000LL;
-	g_atomic_int_set (&frame->buffer->priv->gv_progress_supported,
-			  frame->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE);
+	arv_stream_buffer_progress_set_supported (
+		frame->buffer,
+		frame->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE);
 	_buffer_progress_publish (frame);
 
         if (frame->buffer->priv->payload_type == ARV_BUFFER_PAYLOAD_TYPE_IMAGE ||
@@ -836,7 +818,7 @@ _close_frame (ArvGvStreamThreadData *thread_data,
 	    frame->buffer->priv->status != ARV_BUFFER_STATUS_ABORTED)
 		thread_data->n_missing_packets += (int) frame->n_packets - (frame->last_valid_packet + 1);
 
-	_buffer_progress_end (frame->buffer);
+	arv_stream_buffer_progress_end (frame->buffer);
 	arv_stream_push_output_buffer (thread_data->stream, frame->buffer);
 	if (thread_data->callback != NULL)
 		thread_data->callback (thread_data->callback_data,
@@ -1667,42 +1649,9 @@ arv_gv_stream_get_buffer_progress (ArvGvStream *gv_stream,
 				   ArvBuffer *buffer,
 				   ArvGvStreamBufferProgress *progress)
 {
-	guint attempt;
-
 	g_return_val_if_fail (ARV_IS_GV_STREAM (gv_stream), FALSE);
-	g_return_val_if_fail (ARV_IS_BUFFER (buffer), FALSE);
-	g_return_val_if_fail (progress != NULL, FALSE);
 
-	for (attempt = 0; attempt < 3; attempt++) {
-		gint generation_before;
-		gint generation_after;
-		gint active_before;
-		gint active_after;
-		guint32 frame_id_low;
-		guint32 frame_id_high;
-		gsize committed_size;
-		gboolean supported;
-
-		generation_before = g_atomic_int_get (&buffer->priv->gv_progress_generation);
-		active_before = g_atomic_int_get (&buffer->priv->gv_progress_active);
-		supported = g_atomic_int_get (&buffer->priv->gv_progress_supported);
-		frame_id_low = (guint32) g_atomic_int_get (&buffer->priv->gv_progress_frame_id_low);
-		frame_id_high = (guint32) g_atomic_int_get (&buffer->priv->gv_progress_frame_id_high);
-		committed_size = GPOINTER_TO_SIZE (
-			g_atomic_pointer_get (&buffer->priv->gv_progress_committed_size));
-		active_after = g_atomic_int_get (&buffer->priv->gv_progress_active);
-		generation_after = g_atomic_int_get (&buffer->priv->gv_progress_generation);
-
-		if (generation_before == generation_after && active_before == active_after) {
-			progress->frame_id = ((guint64) frame_id_high << 32) | frame_id_low;
-			progress->committed_size = committed_size;
-			progress->active = active_after;
-			progress->supported = supported;
-			return TRUE;
-		}
-	}
-
-	return FALSE;
+	return arv_stream_get_buffer_progress (ARV_STREAM (gv_stream), buffer, progress);
 }
 
 static gboolean
