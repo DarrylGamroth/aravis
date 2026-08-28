@@ -91,6 +91,7 @@ arv_stream_buffer_progress_begin (ArvBuffer *buffer, guint64 frame_id)
 	g_atomic_int_set (&buffer->priv->stream_progress_frame_id_high, (gint) (guint32) (frame_id >> 32));
 	g_atomic_pointer_set (&buffer->priv->stream_progress_committed_size, GSIZE_TO_POINTER (0));
 	g_atomic_int_set (&buffer->priv->stream_progress_supported, FALSE);
+	g_atomic_int_inc (&buffer->priv->stream_progress_generation);
 	g_atomic_int_set (&buffer->priv->stream_progress_active, TRUE);
 }
 
@@ -155,6 +156,8 @@ arv_stream_get_buffer_progress (ArvStream *stream,
 		gboolean supported;
 
 		generation_before = g_atomic_int_get (&buffer->priv->stream_progress_generation);
+		if ((generation_before & 1) != 0)
+			continue;
 		active_before = g_atomic_int_get (&buffer->priv->stream_progress_active);
 		supported = g_atomic_int_get (&buffer->priv->stream_progress_supported);
 		frame_id_low = (guint32) g_atomic_int_get (&buffer->priv->stream_progress_frame_id_low);
@@ -164,7 +167,8 @@ arv_stream_get_buffer_progress (ArvStream *stream,
 		active_after = g_atomic_int_get (&buffer->priv->stream_progress_active);
 		generation_after = g_atomic_int_get (&buffer->priv->stream_progress_generation);
 
-		if (generation_before == generation_after && active_before == active_after) {
+		if (generation_before == generation_after &&
+		    (generation_after & 1) == 0 && active_before == active_after) {
 			progress->frame_id = ((guint64) frame_id_high << 32) | frame_id_low;
 			progress->committed_size = committed_size;
 			progress->active = active_after;

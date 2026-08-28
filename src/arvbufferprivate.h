@@ -63,7 +63,7 @@ typedef struct {
 	guint64 timestamp_ns;
 	guint64 system_timestamp_ns;
 
-	/* Stream progress. All fields are accessed atomically. */
+	/* Stream progress. All fields are atomic; an odd generation is unstable. */
 	gint stream_progress_generation;
 	gint stream_progress_active;
 	gint stream_progress_supported;
