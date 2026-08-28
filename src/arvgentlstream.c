@@ -782,9 +782,9 @@ arv_gentl_stream_create_buffers (ArvStream *stream, guint n_buffers, size_t size
                 buffer_data = g_new0 (ArvGenTLStreamBufferData, 1);
                 buffer_data->gentl_buffer = gentl_buffer;
                 buffer_data->gentl_data_stream = arv_gentl_data_stream_ref (priv->gentl_data_stream);
-		buffer_data->arv_buffer = buffer;
 
                 buffer = arv_buffer_new_full(size, data, user_data, user_data_destroy_func);
+		buffer_data->arv_buffer = buffer;
                 g_object_set_data_full (G_OBJECT (buffer), "gentl-buffer-data", buffer_data, _buffer_data_destroy_func);
                 arv_stream_push_buffer (stream, buffer);
         }

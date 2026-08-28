@@ -499,8 +499,8 @@ arv_gc_register_node_get (ArvGcRegister *gc_register, void *buffer, guint64 leng
 	ArvGcRegisterNode *gc_register_node = ARV_GC_REGISTER_NODE (gc_register);
 	GError *local_error = NULL;
 	void *cache;
-	gint64 address;
-	gint64 cache_length;
+	gint64 address = 0;
+	gint64 cache_length = 0;
 
 	cache = _get_cache (gc_register_node, &address, &cache_length, &local_error);
 	if (local_error != NULL) {
@@ -536,8 +536,8 @@ arv_gc_register_node_set (ArvGcRegister *gc_register, const void *buffer, guint6
 	ArvGcRegisterNode *gc_register_node = ARV_GC_REGISTER_NODE (gc_register);
 	GError *local_error = NULL;
 	void *cache;
-	gint64 address;
-	gint64 cache_length;
+	gint64 address = 0;
+	gint64 cache_length = 0;
 
 	cache = _get_cache (gc_register_node, &address, &cache_length, &local_error);
 	if (local_error != NULL) {
@@ -780,4 +780,3 @@ arv_gc_register_node_get_endianness  (ArvGcRegisterNode *register_node)
 
 	return _get_endianness (register_node);
 }
-
